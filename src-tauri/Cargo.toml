@@ -1,0 +1,28 @@
+[package]
+name = "contour"
+version = "1.0.0"
+description = "Contour — on-device vocal and instrument stem separation"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "contour_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+contour-engine = { path = "../engine" }
+window-vibrancy = "0.6"
+
+[features]
+# NVIDIA GPU acceleration (Linux / Windows). Windows builds always include DirectML; macOS always includes CoreML.
+cuda = ["contour-engine/cuda"]

@@ -1,0 +1,17 @@
+target/
+node_modules/
+src-tauri/gen/
+*.part
+# models are downloaded at runtime, never committed
+*.onnx
+*.onnx_data
+*.opt.onnx
+models/
+# local outputs and OS clutter
+*.contour
+*audio/
+.DS_Store
+Thumbs.db
+*.log
+playwright-report/
+test-results/

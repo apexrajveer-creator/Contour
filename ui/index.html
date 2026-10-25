@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en" data-mode="simple">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" href="icon.png">
+<title>Contour</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="product.css">
+</head>
+<body>
+<canvas id="pattern-waves" aria-hidden="true"></canvas>
+<div class="app">
+  <header class="bar">
+    <div class="brand">
+      <img class="app-icon" src="icon.png" alt="" width="26" height="26">
+      <span>Contour</span>
+    </div>
+    <div class="now" id="now"><span id="now-name">No song loaded</span><span class="now-sub"><span id="now-meta"></span><span class="status" id="status" role="status" aria-live="polite">Ready</span></span></div>
+    <div class="bar-right">
+      <div class="mode rubber" role="radiogroup" aria-label="Interface mode">
+        <button role="radio" data-mode="simple" aria-checked="true">Simple</button>
+        <button role="radio" data-mode="studio" aria-checked="false">Studio</button>
+        <button role="radio" data-mode="mashup" aria-checked="false">Mashup</button>
+        <button role="radio" data-mode="karaoke" aria-checked="false">Sing</button>
+      </div>
+      <button class="icon-btn" id="open-models" aria-label="Manage models" title="Models">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 17 6.3v7.4L10 17.5 3 13.7V6.3Z"/><path d="M3 6.3 10 10l7-3.7M10 10v7.5"/></svg>
+      </button>
+      <div class="window-controls" aria-label="Window controls">
+        <button class="window-btn" id="window-minimize" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 16 16"><path d="M3 8h10"/></svg></button>
+        <button class="window-btn" id="window-maximize" aria-label="Maximize" title="Maximize"><svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg></button>
+        <button class="window-btn close" id="window-close" aria-label="Close window" title="Close"><svg viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <section class="workspace" id="workspace" aria-label="Processing status">
+    <div class="processor-field">
+      <label for="device">Processor</label><select id="device"></select>
+      <span id="processor-result" class="processor-result"></span>
+    </div>
+    <div class="global-player" aria-label="Shared playback">
+      <button class="round" id="global-play" aria-label="Play" disabled>▶</button>
+      <div><span id="global-clock">0:00 / 0:00</span><input type="range" id="global-seek" min="0" max="1000" value="0" aria-label="Playback position" disabled></div>
+    </div>
+    <div class="task-copy"><span id="task-stage" role="status" aria-live="polite">Checking models…</span><span id="task-detail"></span></div>
+    <span id="task-time" class="task-time"></span>
+    <button class="ghost tiny" id="task-cancel" hidden>Cancel</button>
+    <button class="ghost tiny" id="task-retry" hidden>Retry</button>
+    <div class="meter-line task-progress" id="task-progress" role="progressbar" aria-label="Current task" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i id="task-bar"></i></div>
+  </section>
+  <div class="session-tools">
+    <span id="session-state">No session</span><button id="undo" class="text-action" disabled title="Undo (Ctrl+Z)">Undo</button><button id="redo" class="text-action" disabled title="Redo (Ctrl+Shift+Z)">Redo</button>
+    <button id="mix-indicator" class="text-action" hidden></button>
+    <span class="session-spacer"></span><span class="workflow-role" id="workflow-role">Quick extraction</span>
+    <button class="text-action export-options-open">Export options</button><span class="export-summary"></span>
+  </div>
+  <div id="recovery-banner" class="recovery-banner" hidden><span id="recovery-name">Recover your previous session</span><button class="ghost tiny" id="recover-session">Recover</button><button class="text-action" id="dismiss-recovery">Dismiss</button></div>
+
+  <!-- ═════════════ SIMPLE MODE ═════════════ -->
+  <main class="simple" id="simple">
+    <section class="stage" id="drop">
+      <canvas id="strata" aria-hidden="true"></canvas>
+      <div class="stage-copy" id="stage-copy">
+        <h1>Drop a song.<br>Lift out every part.</h1>
+        <button class="primary" id="choose">Choose a song</button>
+      </div>
+      <i id="strata-cursor" aria-hidden="true"></i>
+      <div class="stage-legend" id="legend"></div>
+    </section>
+
+    <section class="pick" id="pick" aria-label="What to separate">
+      <div class="tiles" role="radiogroup" aria-label="What do you want">
+        <button class="tile" role="radio" data-goal="karaoke" aria-checked="true">
+          <strong>Remove vocals</strong>
+        </button>
+        <button class="tile" role="radio" data-goal="acapella" aria-checked="false">
+          <strong>Isolate vocals</strong>
+        </button>
+        <button class="tile" role="radio" data-goal="four" aria-checked="false">
+          <strong>Split into 4</strong>
+        </button>
+        <button class="tile" role="radio" data-goal="six" aria-checked="false">
+          <strong>Split into 6</strong>
+        </button>
+      </div>
+      <label class="switch flagship-switch"><input type="checkbox" id="simple-flagship"><i></i>Studio quality</label>
+      <div class="go">
+        <button class="primary big" id="simple-run" disabled>Separate</button>
+        <button class="ghost" id="simple-cancel" hidden>Cancel</button>
+        <div class="meter-line" id="simple-progress" hidden><i></i></div>
+        <p class="go-note" id="simple-note"></p>
+      </div>
+    </section>
+
+    <section class="results" id="simple-results" hidden>
+      <div class="result-list" id="result-list"></div>
+      <div class="result-actions">
+        <button class="round" id="simple-play" aria-label="Play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.4v9.2a.6.6 0 0 0 .9.5l7.4-4.6a.6.6 0 0 0 0-1L5.9 2.9a.6.6 0 0 0-.9.5Z"/></svg></button>
+        <span class="clock" id="simple-clock">0:00</span>
+        <button class="primary" id="simple-save">Export stems</button>
+        <button class="ghost" id="simple-studio">Open in Studio</button>
+        <button class="ghost" id="simple-save-project" title="Save everything to reopen later (Ctrl+S)">Save project</button>
+        <button class="ghost" id="simple-reveal" hidden>Show in folder</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ═════════════ STUDIO MODE ═════════════ -->
+  <main class="studio" id="studio">
+    <div class="column-glass left" aria-hidden="true"></div>
+    <div class="column-glass right" aria-hidden="true"></div>
+    <aside class="panel inspector" aria-label="Separation settings">
+      <h2>Separation</h2>
+      <div class="field">
+        <span class="label">Stems</span>
+        <div class="seg rubber" id="stems-seg" role="radiogroup" aria-label="Stems">
+          <button role="radio" data-stems="none">2</button><button role="radio" data-stems="four">4</button><button role="radio" data-stems="six">6</button>
+        </div>
+        <p class="hint" id="stems-hint"></p>
+      </div>
+      <label class="switch"><input type="checkbox" id="lead-backing"><i></i>Split lead and backing vocals</label>
+      <label class="switch"><input type="checkbox" id="dereverb"><i></i>Separate vocal reverb</label>
+      <div class="field">
+        <span class="label">Quality</span>
+        <div class="seg rubber" id="quality-seg" role="radiogroup" aria-label="Quality">
+          <button role="radio" data-quality="fast">Fast</button><button role="radio" data-quality="balanced">Balanced</button><button role="radio" data-quality="max">Max</button>
+        </div>
+        <p class="hint" id="quality-hint"></p>
+      </div>
+
+      <div class="chain" id="chain" aria-label="Models used"></div>
+      <label class="switch"><input type="checkbox" id="region-sep"><i></i>Only the loop region</label>
+      <p class="estimate" id="estimate" aria-live="polite"></p>
+      <button class="primary wide" id="studio-run" disabled>Separate</button>
+      <button class="ghost wide" id="studio-cancel" hidden>Cancel</button>
+      <div class="job" id="job" hidden>
+        <div class="job-row"><span id="job-stage">Preparing</span><span id="job-pct">0%</span></div>
+        <div class="meter-line"><i id="job-bar"></i></div>
+        <div class="job-row dim"><span id="job-detail"></span><span id="job-time">0:00</span></div>
+      </div>
+      <button class="ghost wide import" id="studio-choose">Import song…</button>
+      <button class="ghost wide" id="open-project" title="Open a saved project (Ctrl+O)">Open project…</button>
+    </aside>
+
+    <section class="panel timeline" aria-label="Stem mixer">
+      <div class="ruler-row">
+        <div class="lane-head-spacer"><span id="engine-tag">Native engine</span></div>
+        <canvas id="ruler" title="Drag to set a loop region · double-click to clear"></canvas>
+      </div>
+      <div class="lanes" id="lanes"></div>
+      <div class="timeline-shade" id="timeline-shade" hidden></div>
+      <div class="playhead" id="playhead" hidden></div>
+    </section>
+
+    <aside class="panel delivery" aria-label="Export">
+      <h2>Export</h2>
+      <p class="export-summary"></p><button class="ghost wide export-options-open">Export options</button>
+      <div class="field"><span class="label">Stems</span><div class="export-list" id="export-list"><p class="dim">Separate a song first.</p></div></div>
+      <button class="primary wide" id="export" disabled>Export stems</button>
+      <button class="ghost wide" id="save-project" title="Save the song, stems, mixer and curves (Ctrl+S)">Save project</button>
+      <button class="ghost wide" id="bounce" disabled title="Render what you hear, with levels, pans and mutes">Export mix</button>
+      <button class="ghost wide" id="reveal" hidden>Show in folder</button>
+      <dl class="keys">
+        <dt>Space</dt><dd>Play or pause</dd><dt>1-9</dt><dd>Solo a lane</dd><dt>0</dt><dd>Clear solos</dd>
+        <dt>N</dt><dd>Null test</dd><dt>L</dt><dd>Loop</dd><dt>A</dt><dd>Curves</dd>
+        <dt>Ctrl + S</dt><dd>Save project</dd><dt>Ctrl + O</dt><dd>Open project</dd><dt>?</dt><dd>All shortcuts</dd>
+      </dl>
+    </aside>
+
+    <footer class="transport" aria-label="Transport">
+      <button class="round" id="play" aria-label="Play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.4v9.2a.6.6 0 0 0 .9.5l7.4-4.6a.6.6 0 0 0 0-1L5.9 2.9a.6.6 0 0 0-.9.5Z"/></svg></button>
+      <button class="icon-btn" id="stop" aria-label="Back to start"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12M15 4 7 10l8 6Z"/></svg></button>
+      <div class="time"><span id="time">0:00.0</span><span id="duration">/ 0:00</span></div>
+      <button class="toggle" id="loop" aria-pressed="false">Loop</button>
+      <button class="toggle drawer-btn" id="export-drawer" aria-pressed="false" title="Show export options">Export</button>
+      <button class="toggle" id="tool-split" aria-pressed="false" title="Split tool (C) · S splits at the playhead">Split</button>
+      <button class="toggle" id="snap" aria-pressed="true" title="Snap to grid, playhead and clip edges (G) · hold Alt to move freely">Snap</button>
+      <button class="toggle" id="curves" aria-pressed="false" title="Draw volume curves on the lanes (A)">Curves</button>
+      <button class="toggle" id="null" aria-pressed="false" title="Plays the original minus the sum of the stems: what the separation missed">Null test</button><button class="tool rec-btn" id="rec" aria-pressed="false" title="Record from your microphone onto a new lane (R)"><i aria-hidden="true"></i>Rec</button>
+      <div class="zoom"><button class="icon-btn" id="zoom-out" aria-label="Zoom out">−</button><span id="zoom-label">Fit</span><button class="icon-btn" id="zoom-in" aria-label="Zoom in">+</button></div>
+      <div class="master"><span>Master</span><input type="range" id="volume" min="0" max="100" value="80" aria-label="Master volume"><canvas id="master-meter" width="80" height="10" aria-hidden="true"></canvas></div>
+    </footer>
+  </main>
+  <!-- ═════════════ MASHUP LAB ═════════════ -->
+  <main class="mashup" id="mashup">
+    <section class="mash-slots" aria-label="Songs">
+      <div class="mash-slot" id="slot-a" data-slot="a">
+        <span class="mash-role">Vocals from</span>
+        <strong class="mash-name">Choose a song</strong>
+        <span class="mash-meta">Its singer will be lifted out</span>
+        <canvas class="mash-wave" aria-hidden="true"></canvas>
+        <button class="ghost mash-pick">Choose…</button><button class="text-action mash-use">Use current song</button>
+      </div>
+      <button class="icon-btn mash-swap" id="mash-swap" aria-label="Swap the two songs" title="Swap songs"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 7h11l-3-3M16 13H5l3 3"/></svg></button>
+      <div class="mash-slot" id="slot-b" data-slot="b">
+        <span class="mash-role">Music from</span>
+        <strong class="mash-name">Choose a song</strong>
+        <span class="mash-meta">Its band will play under the vocals</span>
+        <canvas class="mash-wave" aria-hidden="true"></canvas>
+        <button class="ghost mash-pick">Choose…</button><button class="text-action mash-use">Use current song</button>
+      </div>
+    </section>
+    <section class="mash-go" id="mash-go">
+      <div class="mash-switches">
+        <label class="switch"><input type="checkbox" id="mash-split"><i></i>Split the music into drums, bass and other</label>
+        <label class="switch"><input type="checkbox" id="mash-flagship"><i></i>Studio quality</label>
+      </div>
+      <button class="primary big" id="mash-run" disabled>Make mashup</button>
+      <div class="meter-line" id="mash-progress" hidden><i></i></div>
+      <p class="go-note" id="mash-note" aria-live="polite">Choose a song for the vocals and one for the music.</p>
+    </section>
+    <p id="mash-stale" class="mash-stale" role="status" hidden>The result below is the previous version. Rebuild to use your new sources or separation settings.</p>
+    <section class="mash-result" id="mash-result" hidden aria-label="Your mashup">
+      <div class="mash-summary" id="mash-summary"></div>
+      <div class="result-list" id="mash-rows"></div>
+      <div class="mash-controls">
+        <div class="mash-ctl"><span class="label">Key</span>
+          <button class="ghost tiny" id="mash-key-down" aria-label="Key down a semitone">−</button>
+          <output id="mash-key" class="mash-value">auto</output>
+          <button class="ghost tiny" id="mash-key-up" aria-label="Key up a semitone">+</button>
+          <button class="ghost tiny" id="mash-key-auto">Auto</button></div>
+        <div class="mash-ctl"><span class="label">Entry</span>
+          <button class="ghost tiny" data-move="-4" aria-label="Vocals one bar earlier">− bar</button>
+          <button class="ghost tiny" data-move="-1" aria-label="Vocals one beat earlier">− beat</button>
+          <output id="mash-entry" class="mash-value">0:00</output>
+          <button class="ghost tiny" data-move="1" aria-label="Vocals one beat later">+ beat</button>
+          <button class="ghost tiny" data-move="4" aria-label="Vocals one bar later">+ bar</button></div>
+        <div class="mash-ctl"><span class="label">Nudge</span><input type="range" id="mash-nudge" min="-250" max="250" step="5" value="0" aria-label="Fine timing"><output id="mash-nudge-v" class="mash-value">0 ms</output></div>
+        <div class="mash-ctl"><span class="label">Vocal level</span><input type="range" id="mash-gain" min="-12" max="12" step="0.5" value="0" aria-label="Vocal level"><output id="mash-gain-v" class="mash-value">0 dB</output></div>
+        <div class="mash-ctl"><span class="label">Feel</span>
+          <div class="seg rubber" id="mash-tempo" role="radiogroup" aria-label="Tempo feel">
+            <button role="radio" data-tempo="half" aria-checked="false" title="Half-time feel">Half</button>
+            <button role="radio" data-tempo="auto" aria-checked="true">Matched</button>
+            <button role="radio" data-tempo="double" aria-checked="false" title="Double-time feel">Double</button>
+          </div></div>
+        <label class="switch"><input type="checkbox" id="mash-lock" checked><i></i>Lock the vocals to every beat</label>
+      </div>
+      <div class="result-actions">
+        <button class="round" id="mash-play" aria-label="Play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.4v9.2a.6.6 0 0 0 .9.5l7.4-4.6a.6.6 0 0 0 0-1L5.9 2.9a.6.6 0 0 0-.9.5Z"/></svg></button>
+        <span class="clock" id="mash-clock">0:00</span>
+        <button class="primary" id="mash-save">Export mix</button>
+        <button class="ghost" id="mash-stems">Export stems</button>
+        <button class="ghost" id="mash-studio">Open in Studio</button>
+        <button class="ghost" id="mash-save-project">Save project</button>
+        <button class="ghost" id="mash-again">New mashup</button>
+      </div>
+    </section>
+  </main>
+  <!-- ═════════════ SING ═════════════ -->
+  <main class="karaoke" id="karaoke">
+    <section class="sing-setup" id="sing-setup">
+      <h2 class="sing-title" id="sing-song">Choose a song</h2>
+      <p class="sing-sub" id="sing-sub"></p>
+      <div class="sing-actions">
+        <button class="primary big" id="sing-start" disabled>Start singing</button>
+        <button class="ghost" id="sing-choose">Choose a song…</button>
+        <button class="ghost" id="sing-import" title="Bring in a vocal you recorded elsewhere; it's lined up with the song automatically">Import a take…</button>
+        <button class="ghost" id="sing-tune-take" hidden>Tune your take</button>
+      </div>
+      <div class="sing-lyrics-row">
+        <button class="ghost" id="sing-lyrics-get">Get lyrics</button>
+        <select id="sing-lang" aria-label="Language of the song">
+          <option value="">Language: detect</option><option value="en">English</option><option value="hi">Hindi</option><option value="ta">Tamil</option>
+          <option value="te">Telugu</option><option value="pa">Punjabi</option><option value="es">Spanish</option><option value="fr">French</option>
+          <option value="de">German</option><option value="pt">Portuguese</option><option value="it">Italian</option><option value="ja">Japanese</option>
+          <option value="ko">Korean</option><option value="zh">Chinese</option>
+        </select>
+        <span class="sing-lyrics-status" id="sing-lyrics-status"></span>
+        <button class="ghost tiny" id="sing-lyrics-edit" hidden>Edit</button>
+      </div>
+      <div class="sing-options">
+        <label class="sing-opt"><span class="label">Microphone</span><select id="sing-mic"><option value="">Default microphone</option></select></label>
+        <label class="sing-opt"><span class="label">Guide vocal</span><input type="range" id="sing-guide" min="0" max="100" value="15"></label>
+        <label class="sing-opt"><span class="label">Sync</span><input type="range" id="sing-sync" min="-200" max="300" step="5" value="0"><output id="sing-sync-v">auto</output></label>
+      </div>
+      <p class="sing-hint" id="sing-hint">Use headphones, so the music doesn't leak into your take.</p>
+    </section>
+    <section class="sing-stage" id="sing-stage" hidden>
+      <div class="sing-hud">
+        <div><span id="sing-score">-</span><small>on pitch</small></div>
+        <div><span id="sing-notes">0/0</span><small>notes</small></div>
+        <div><span id="sing-streak">0</span><small>streak</small></div>
+        <div class="sing-meter" aria-hidden="true"><i id="sing-level"></i></div>
+        <div class="sing-combo" id="sing-combo" aria-label="Lines in a row"></div>
+      </div>
+      <div class="sing-rate-layer" id="sing-rate-layer" aria-live="polite"></div>
+      <div class="seg rubber sing-view" id="sing-view" role="radiogroup" aria-label="Show" hidden>
+        <button role="radio" data-view="lyrics" aria-checked="true">Lyrics</button>
+        <button role="radio" data-view="notes" aria-checked="false">Notes</button>
+      </div>
+      <div class="lyrics" id="lyrics" aria-live="off"></div>
+      <canvas id="sing-canvas" aria-label="Melody and your pitch"></canvas>
+      <div class="sing-controls">
+        <label class="sing-vocal-ctl"><span>Vocals</span><input type="range" id="sing-vocals" min="0" max="100" value="15" aria-label="Original vocal level"></label>
+        <button class="primary" id="sing-stop">Finish</button><button class="ghost" id="sing-cancel">Cancel</button>
+      </div>
+    </section>
+    <section class="sing-results" id="sing-results" hidden>
+      <div class="sing-grade" id="sing-grade" aria-label="Grade">-</div>
+      <div class="sing-big"><span id="sing-final">0</span><small>% on pitch</small></div>
+      <p class="sing-verdict" id="sing-verdict"></p>
+      <div class="sing-strip" id="sing-strip" aria-label="How each line went" hidden></div>
+      <p class="sing-counts" id="sing-counts"></p>
+      <p class="sing-best" id="sing-best"></p>
+      <div class="sing-stats" id="sing-stats"></div>
+      <section class="tune" id="tune" hidden aria-label="Tune your take">
+        <canvas id="tune-canvas" aria-label="Your pitch: as sung, target and tuned"></canvas>
+        <div class="tune-legend"><span class="sung">As sung</span><span class="target">Target</span><span class="tuned">Tuned</span><span class="tune-score" id="tune-score"></span><span class="tune-busy" id="tune-busy" hidden>Tuning…</span></div>
+        <div class="tune-controls">
+          <div class="tune-ctl"><span class="label">Follow</span>
+            <div class="seg rubber" id="tune-mode" role="radiogroup" aria-label="Tune to">
+              <button role="radio" data-tune-mode="melody" aria-checked="true">Melody</button>
+              <button role="radio" data-tune-mode="key" aria-checked="false">Key</button>
+            </div></div>
+          <div class="tune-ctl"><span class="label">Strength</span><input type="range" id="tune-strength" min="0" max="100" value="100" aria-label="Strength"><output id="tune-strength-v">100%</output></div>
+          <div class="tune-ctl"><span class="label">Speed</span><input type="range" id="tune-speed" min="0" max="100" value="55" aria-label="Retune speed"><output id="tune-speed-v">Natural</output></div>
+          <div class="tune-ctl tune-switches">
+            <label class="switch"><input type="checkbox" id="tune-vibrato" checked><i></i>Keep vibrato</label>
+            <label class="switch"><input type="checkbox" id="tune-ab" checked><i></i>Tuned</label>
+          </div>
+        </div>
+      </section>
+      <div class="sing-actions">
+        <button class="primary" id="sing-tune">Tune it</button>
+        <button class="primary" id="sing-listen">Listen back</button>
+        <button class="ghost" id="sing-save">Save take</button>
+        <button class="ghost" id="sing-save-song" title="Your take (tuned or original) over the instrumental, as one file">Save song</button>
+        <button class="ghost" id="sing-again">Sing again</button>
+        <button class="ghost" id="sing-studio">Open in Studio</button>
+      </div>
+    </section>
+  </main>
+
+
+</div>
+
+<div class="modal" id="export-options" hidden>
+ <div class="sheet export-sheet" role="dialog" aria-modal="true" aria-labelledby="export-title">
+  <div class="sheet-head"><h2 id="export-title">Export options</h2><button class="icon-btn" id="close-export-options" aria-label="Close export options">×</button></div>
+  <p class="dim">These settings apply in Simple, Studio and Mashup.</p>
+      <div class="field"><label class="label" for="format">Format</label>
+        <select id="format">
+          <option value="wav24">WAV 24-bit</option><option value="wav32f">WAV 32-bit float</option><option value="wav16">WAV 16-bit, dithered</option>
+          <option value="flac24">FLAC 24-bit</option><option value="flac16">FLAC 16-bit, dithered</option>
+        </select></div>
+      <div class="field"><label class="label" for="rate">Sample rate</label>
+        <select id="rate"><option value="">Same as source</option><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option><option value="96000">96 kHz</option></select></div>
+      <label class="switch"><input type="checkbox" id="protect" checked><i></i>Keep peaks under −1 dBFS</label>
+      <label class="switch"><input type="checkbox" id="range-only"><i></i>Only the loop region</label>
+      <label class="switch"><input type="checkbox" id="apply-curves" checked><i></i>Apply volume curves</label>
+  <p class="export-summary"></p>
+ </div>
+</div>
+<div class="modal" id="models-modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="models-title">
+    <div class="sheet-head"><div><h2 id="models-title">Settings</h2><p class="dim" id="models-dir"></p></div><button class="icon-btn" id="close-models" aria-label="Close"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
+    <section class="sheet-section">
+      <h3>Export</h3>
+      <div class="setting-row"><span>Export folder</span><span class="setting-value" id="setting-export-dir"></span><button class="ghost" id="setting-change-dir">Change…</button></div>
+      <label class="switch"><input type="checkbox" id="setting-ask" checked><i></i>Ask where to save each time</label>
+    </section>
+    <section class="sheet-section">
+      <h3>Storage</h3>
+      <div class="setting-row"><span>Models</span><span class="setting-value" id="setting-storage"></span><button class="ghost" id="setting-show-models">Show in folder</button></div>
+    </section>
+    <section class="sheet-section">
+      <h3>Keyboard</h3>
+      <dl class="shortcut-list">
+        <dt>Space</dt><dd>Play or pause</dd><dt>← →</dt><dd>Skip 5 seconds</dd><dt>1-9</dt><dd>Play only that stem</dd><dt>Shift + 1-9</dt><dd>Add a stem (or take it out)</dd><dt>0</dt><dd>Everything back</dd><dt>Ctrl + K</dt><dd>Command palette</dd><dt>R</dt><dd>Record in Studio (R or Space stops)</dd><dt>Ctrl + Z</dt><dd>Undo · Ctrl + Shift + Z redo</dd><dt>Click / drag</dt><dd>Select · move clips</dd><dt>Alt + drag</dt><dd>Precision: a tenth of the speed, no snapping</dd><dt>Clip edges · top corners</dt><dd>Trim · fade in / out</dd><dt>S</dt><dd>Split at the playhead</dd><dt>C / V</dt><dd>Split tool / select tool</dd><dt>G</dt><dd>Snap on / off</dd><dt>Delete</dt><dd>Delete clips</dd><dt>Ctrl + D / C / X / V</dt><dd>Duplicate · copy · cut · paste at playhead</dd><dt>Ctrl + A</dt><dd>Select all clips</dd><dt>Ctrl + drag</dt><dd>Box-select clips across lanes</dd><dt>Drag a lane name</dt><dd>Reorder · double-click to rename</dd><dt>Alt + ← →</dt><dd>Nudge clips by the grid</dd><dt>+ / −</dt><dd>Clip gain</dd>
+        <dt>L</dt><dd>Loop</dd><dt>N</dt><dd>Null test</dd><dt>A</dt><dd>Curves mode (Studio)</dd>
+        <dt>Ctrl + Z / Shift + Z</dt><dd>Undo / redo</dd><dt>Ctrl + S</dt><dd>Save project (Shift: save as)</dd><dt>Ctrl + O</dt><dd>Open project</dd><dt>Ctrl + = / −</dt><dd>Zoom</dd>
+        <dt>Tab</dt><dd>Move between controls; arrow keys change segmented controls</dd>
+        <dt>Curves (waveform focused)</dt><dd>Enter adds a point · ← → select · ↑ ↓ level · , . move · Delete removes</dd>
+        <dt>?</dt><dd>Open this sheet</dd>
+      </dl>
+    </section>
+    <section class="sheet-section">
+      <h3>Models</h3>
+      <div id="models-table"></div>
+    </section>
+    <div class="sheet-foot"><span class="dim" id="models-total"></span><button class="primary" id="download-all">Download all</button></div>
+  </div>
+</div>
+<div class="setup" id="setup" hidden>
+  <div class="setup-card" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <img class="setup-icon" src="icon.png" alt="" width="76" height="76">
+    <h2 id="setup-title">Setting up Contour</h2>
+    <p class="setup-intro">Contour downloads its separation models once. After that, everything runs on this computer, offline.</p>
+    <ul class="setup-list" id="setup-list"></ul>
+    <div class="setup-progress" id="setup-progress" hidden>
+      <div class="meter-line"><i id="setup-bar"></i></div>
+      <div class="setup-row"><span id="setup-stage">Preparing</span><span id="setup-detail"></span></div>
+    </div>
+    <p class="setup-error" id="setup-error" hidden></p>
+    <div class="setup-actions"><button class="ghost" id="setup-skip">Skip for now</button><button class="primary" id="setup-start">Download</button></div>
+  </div>
+</div>
+<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+  <h2 id="confirm-title"></h2><p id="confirm-message"></p>
+  <div class="confirm-actions"><button class="ghost" id="confirm-no">Back</button><button class="primary" id="confirm-yes">Continue</button></div>
+</dialog>
+<div class="livetune" id="livetune" hidden role="dialog" aria-label="Hear yourself, tuned">
+  <div class="lt-head"><strong>Hear yourself</strong><span class="lt-latency" id="lt-latency"></span><button class="icon-btn lt-close" id="lt-close" aria-label="Close">×</button></div>
+  <div class="lt-note"><span id="lt-note">-</span><div class="lt-scale" aria-hidden="true"><i id="lt-cents"></i></div></div>
+  <div class="lt-meter" aria-hidden="true"><i id="lt-level"></i></div>
+  <label class="switch"><input type="checkbox" id="lt-phones"><i></i>I'm wearing headphones</label>
+  <div class="lt-row"><span class="label">Tune</span><input type="range" id="lt-strength" min="0" max="100" value="100" aria-label="Tune strength"><output id="lt-strength-v">100%</output></div>
+  <label class="switch"><input type="checkbox" id="lt-shimmer" checked><i></i>Shimmer</label>
+  <p class="lt-hint" id="lt-hint"></p>
+  <button class="primary" id="lt-start">Start</button>
+</div>
+<div class="modal lyrics-editor" id="lyrics-editor" hidden role="dialog" aria-label="Edit lyrics">
+  <div class="sheet"><h2>Edit lyrics</h2><div class="ly-edit-list" id="ly-edit-list"></div>
+  <div class="sing-actions"><button class="primary" id="ly-edit-save">Save</button><button class="ghost" id="ly-edit-cancel">Cancel</button></div></div>
+</div>
+<div class="palette" id="palette" hidden role="dialog" aria-label="Command palette">
+  <div class="palette-box"><input id="palette-input" type="text" placeholder="Type a command…" aria-label="Search commands" autocomplete="off" spellcheck="false">
+  <ul id="palette-list" role="listbox"></ul><p class="palette-hint"><kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</p></div>
+</div>
+<div class="select-box" id="select-box" hidden aria-hidden="true"></div>
+<div class="toast" id="toast" role="alert" hidden></div>
+<div class="menu" id="menu" role="menu" hidden></div>
+<div class="readout" id="readout" hidden></div>
+<script src="pattern-waves.js"></script>
+<script src="motion.js"></script>
+<script src="glass-ui.js"></script>
+<script src="controls.js"></script>
+<script src="mock.js"></script>
+<script src="workflow.js"></script>
+<script src="product.js"></script>
+<script src="app.js"></script>
+<script src="clips.js"></script>
+<script src="karaoke.js"></script>
+<script src="sound.js"></script>
+<script src="livetune.js"></script>
+<script src="polish.js"></script>
+</body>
+</html>

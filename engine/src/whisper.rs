@@ -1,0 +1,659 @@
+//! Lyrics: on-device Whisper (large-v3-turbo) transcription of a separated vocal.
+//!
+//! 1. The vocal is cut into windows of actual singing (≤ 28 s), so silence and instrumental breaks
+//!    never reach the model (the main cause of Whisper's invented lines).
+//! 2. Each window becomes Whisper's 128- (or 80-) band log-mel spectrogram (verified against the
+//!    reference extractor to 1e-7) and runs through the encoder once.
+//! 3. Greedy decoding with timestamps gives lines with start and end times; the audio-side attention
+//!    cache is computed once per window and passed by reference, only the text-side cache grows.
+//! 4. Repetition loops, bracketed noise tags and low-confidence windows are dropped; word timings are
+//!    estimated within each line from syllable counts.
+//!
+//! Model choice: the 4-bit weight-only encoder matches full precision exactly on test speech, while the
+//! 8-bit dynamically quantised encoder garbles it; the 8-bit decoder is fine.
+
+use crate::{models, runtime, Stereo, SR};
+use anyhow::{anyhow, Context, Result};
+use ort::{session::Session, value::{DynValue, Tensor}};
+use realfft::RealFftPlanner;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Registry ids of the files Whisper needs.
+pub const MODEL_IDS: [&str; 5] = ["whisper_encoder", "whisper_decoder", "whisper_vocab", "whisper_added_tokens", "whisper_generation"];
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Word {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+#[derive(Serialize, Clone, Debug)]
+pub struct Line {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub words: Vec<Word>,
+}
+#[derive(Serialize, Clone, Debug)]
+pub struct Lyrics {
+    pub language: String,
+    pub lines: Vec<Line>,
+}
+
+const WSR: u32 = 16_000;
+const N_FFT: usize = 400;
+const HOP: usize = 160;
+const CHUNK: usize = 480_000; // 30 s
+
+// ───────────────────────── features ─────────────────────────
+
+/// Slaney mel filterbank (librosa's default), `n_mels × 201`.
+fn mel_filters(n_mels: usize) -> Vec<f32> {
+    let (lin, logstep) = (1000.0 / (200.0 / 3.0), (6.4f64).ln() / 27.0);
+    let hz_to_mel = |f: f64| if f >= 1000.0 { lin + (f / 1000.0).ln() / logstep } else { f / (200.0 / 3.0) };
+    let mel_to_hz = |m: f64| if m >= lin { 1000.0 * (logstep * (m - lin)).exp() } else { (200.0 / 3.0) * m };
+    let bins = N_FFT / 2 + 1;
+    let (m0, m1) = (hz_to_mel(0.0), hz_to_mel(WSR as f64 / 2.0));
+    let pts: Vec<f64> = (0..n_mels + 2).map(|i| mel_to_hz(m0 + (m1 - m0) * i as f64 / (n_mels + 1) as f64)).collect();
+    let fft_f: Vec<f64> = (0..bins).map(|i| i as f64 * (WSR as f64 / 2.0) / (bins - 1) as f64).collect();
+    let mut w = vec![0f32; n_mels * bins];
+    for i in 0..n_mels {
+        let enorm = 2.0 / (pts[i + 2] - pts[i]);
+        for (j, &f) in fft_f.iter().enumerate() {
+            let lo = (f - pts[i]) / (pts[i + 1] - pts[i]);
+            let hi = (pts[i + 2] - f) / (pts[i + 2] - pts[i + 1]);
+            w[i * bins + j] = (lo.min(hi).max(0.0) * enorm) as f32;
+        }
+    }
+    w
+}
+
+/// Whisper's log-mel spectrogram of up to 30 s of 16 kHz audio: `n_mels × 3000`.
+fn log_mel(x: &[f32], filters: &[f32], n_mels: usize) -> Vec<f32> {
+    let mut sig = vec![0f32; CHUNK];
+    sig[..x.len().min(CHUNK)].copy_from_slice(&x[..x.len().min(CHUNK)]);
+    let half = N_FFT / 2;
+    let padded: Vec<f32> = (0..CHUNK + N_FFT)
+        .map(|i| {
+            let j = i as isize - half as isize;
+            let k = if j < 0 { -j } else if j as usize >= CHUNK { 2 * (CHUNK as isize - 1) - j } else { j };
+            sig[k as usize]
+        })
+        .collect();
+    let win: Vec<f32> = (0..N_FFT).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / N_FFT as f32).cos()).collect();
+    let fft = RealFftPlanner::<f32>::new().plan_fft_forward(N_FFT);
+    let (mut buf, mut spec) = (fft.make_input_vec(), fft.make_output_vec());
+    let bins = N_FFT / 2 + 1;
+    let frames = 3000;
+    let mut mel = vec![0f32; n_mels * frames];
+    let mut power = vec![0f32; bins];
+    for t in 0..frames {
+        for i in 0..N_FFT {
+            buf[i] = padded[t * HOP + i] * win[i];
+        }
+        fft.process(&mut buf, &mut spec).expect("fft");
+        for (p, z) in power.iter_mut().zip(&spec) {
+            *p = z.re * z.re + z.im * z.im;
+        }
+        for m in 0..n_mels {
+            let row = &filters[m * bins..(m + 1) * bins];
+            mel[m * frames + t] = row.iter().zip(&power).map(|(a, b)| a * b).sum::<f32>();
+        }
+    }
+    let mut top = f32::MIN;
+    for v in mel.iter_mut() {
+        *v = v.max(1e-10).log10();
+        top = top.max(*v);
+    }
+    for v in mel.iter_mut() {
+        *v = (v.max(top - 8.0) + 4.0) / 4.0;
+    }
+    mel
+}
+
+// ───────────────────────── tokens ─────────────────────────
+
+struct Tokenizer {
+    id2tok: HashMap<u32, String>,
+    byte_dec: HashMap<char, u8>,
+}
+impl Tokenizer {
+    fn load(vocab: &Path, added: &Path) -> Result<Self> {
+        let mut id2tok = HashMap::new();
+        for p in [vocab, added] {
+            let m: HashMap<String, u32> = serde_json::from_slice(&std::fs::read(p).with_context(|| format!("read {}", p.display()))?)?;
+            for (k, v) in m {
+                id2tok.insert(v, k);
+            }
+        }
+        // GPT-2's byte ↔ unicode table
+        let mut bs: Vec<u32> = (b'!' as u32..=b'~' as u32).chain(0xA1..=0xAC).chain(0xAE..=0xFF).collect();
+        let mut cs = bs.clone();
+        let mut n = 0;
+        for b in 0..256u32 {
+            if !bs.contains(&b) {
+                bs.push(b);
+                cs.push(256 + n);
+                n += 1;
+            }
+        }
+        let byte_dec = bs.iter().zip(&cs).map(|(b, c)| (char::from_u32(*c).unwrap(), *b as u8)).collect();
+        Ok(Tokenizer { id2tok, byte_dec })
+    }
+    fn decode(&self, ids: &[u32]) -> String {
+        let bytes: Vec<u8> = ids.iter().filter_map(|i| self.id2tok.get(i)).flat_map(|t| t.chars().filter_map(|c| self.byte_dec.get(&c).copied())).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+// ───────────────────────── model ─────────────────────────
+
+struct Whisper {
+    enc: Session,
+    dec: Session,
+    n_mels: usize,
+    layers: usize,
+    filters: Vec<f32>,
+    tok: Tokenizer,
+    sot: u32,
+    eot: u32,
+    transcribe: u32,
+    ts0: u32,
+    langs: Vec<(String, u32)>,
+    suppress: Vec<u32>,
+    vocab: usize,
+}
+
+impl Whisper {
+    fn load(dir: &Path) -> Result<Self> {
+        let path = |id: &str| -> Result<std::path::PathBuf> { Ok(models::path(dir, models::spec(id)?)) };
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path("whisper_generation")?)?)?;
+        let num = |k: &str| config.get(k).and_then(|v| v.as_u64()).map(|v| v as u32).ok_or_else(|| anyhow!("generation config lacks {k}"));
+        let nots = num("no_timestamps_token_id")?;
+        let langs: Vec<(String, u32)> = config
+            .get("lang_to_id")
+            .and_then(|m| m.as_object())
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.trim_matches(|c| c == '<' || c == '|' || c == '>').to_string(), v.as_u64()? as u32))).collect())
+            .unwrap_or_default();
+        let suppress = config.get("suppress_tokens").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_u64().map(|v| v as u32)).collect()).unwrap_or_default();
+        let tok = Tokenizer::load(&path("whisper_vocab")?, &path("whisper_added_tokens")?)?;
+        let transcribe = tok.id2tok.iter().find(|(_, t)| t.as_str() == "<|transcribe|>").map(|(i, _)| *i).ok_or_else(|| anyhow!("no <|transcribe|> token"))?;
+        // The 4-bit encoder and 8-bit decoder run on the CPU (their quantised kernels are CPU-only).
+        let (enc, _) = runtime::load_session(&path("whisper_encoder")?, runtime::Device::Cpu, true)?;
+        let (dec, _) = runtime::load_session(&path("whisper_decoder")?, runtime::Device::Cpu, true)?;
+        let layers = dec.inputs().iter().filter(|i| i.name().ends_with(".decoder.key")).count();
+        let n_mels = enc.inputs().first().and_then(|i| i.dtype().tensor_shape().map(|s| s.to_vec())).and_then(|s| s.get(1).copied()).filter(|v| *v > 0).map(|v| v as usize).unwrap_or(128);
+        let vocab = tok.id2tok.keys().copied().max().unwrap_or(0) as usize + 1;
+        Ok(Whisper { enc, dec, n_mels, layers, filters: mel_filters(n_mels), tok, sot: num("decoder_start_token_id")?, eot: num("eos_token_id")?, transcribe, ts0: nots + 1, langs, suppress, vocab })
+    }
+
+    fn encode(&mut self, x: &[f32]) -> Result<DynValue> {
+        let mel = log_mel(x, &self.filters, self.n_mels);
+        let t = Tensor::from_array(([1usize, self.n_mels, 3000], mel)).map_err(|e| anyhow!("{e}"))?;
+        let mut out = self.enc.run(ort::inputs!["input_features" => t]).map_err(|e| anyhow!("whisper encoder: {e}"))?;
+        out.remove("last_hidden_state").ok_or_else(|| anyhow!("encoder output missing"))
+    }
+
+    /// One decoder step. With `past = None` (the prompt step) the new attention cache is returned.
+    fn step(&mut self, ids: &[u32], h: &DynValue, past: Option<&mut Past>) -> Result<(Vec<f32>, Option<Past>)> {
+        let mut inputs: Vec<(String, ort::session::SessionInputValue<'_>)> = Vec::new();
+        let idt = Tensor::from_array(([1usize, ids.len()], ids.iter().map(|v| *v as i64).collect::<Vec<i64>>())).map_err(|e| anyhow!("{e}"))?;
+        inputs.push(("input_ids".into(), idt.into()));
+        inputs.push(("encoder_hidden_states".into(), h.into()));
+        let cached = past.is_some();
+        inputs.push(("use_cache_branch".into(), Tensor::from_array(([1usize], vec![cached])).map_err(|e| anyhow!("{e}"))?.into()));
+        let empty = |heads: usize, hd: usize| Tensor::from_array(([1usize, heads, 0, hd], Vec::<f32>::new()));
+        let (heads, hd) = self.dims();
+        match &past {
+            Some(p) => {
+                for l in 0..self.layers {
+                    inputs.push((format!("past_key_values.{l}.decoder.key"), (&p.dk[l]).into()));
+                    inputs.push((format!("past_key_values.{l}.decoder.value"), (&p.dv[l]).into()));
+                    inputs.push((format!("past_key_values.{l}.encoder.key"), (&p.ek[l]).into()));
+                    inputs.push((format!("past_key_values.{l}.encoder.value"), (&p.ev[l]).into()));
+                }
+            }
+            None => {
+                for l in 0..self.layers {
+                    for kind in ["decoder", "encoder"] {
+                        for kv in ["key", "value"] {
+                            inputs.push((format!("past_key_values.{l}.{kind}.{kv}"), empty(heads, hd).map_err(|e| anyhow!("{e}"))?.into()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = self.dec.run(inputs).map_err(|e| anyhow!("whisper decoder: {e}"))?;
+        let logits = {
+            let (shape, data) = out["logits"].try_extract_tensor::<f32>().map_err(|e| anyhow!("{e}"))?;
+            let v = shape[2] as usize;
+            data[data.len() - v..].to_vec()
+        };
+        let layers = self.layers;
+        let mut take = |name: String| out.remove(&name).ok_or_else(|| anyhow!("decoder output {name} missing"));
+        match past {
+            Some(p) => {
+                // only the text-side cache grows; the audio-side cache stays as computed on the first step
+                for l in 0..layers {
+                    p.dk[l] = take(format!("present.{l}.decoder.key"))?;
+                    p.dv[l] = take(format!("present.{l}.decoder.value"))?;
+                }
+                Ok((logits, None))
+            }
+            None => {
+                let mut p = Past::default();
+                for l in 0..layers {
+                    p.dk.push(take(format!("present.{l}.decoder.key"))?);
+                    p.dv.push(take(format!("present.{l}.decoder.value"))?);
+                    p.ek.push(take(format!("present.{l}.encoder.key"))?);
+                    p.ev.push(take(format!("present.{l}.encoder.value"))?);
+                }
+                Ok((logits, Some(p)))
+            }
+        }
+    }
+
+    fn dims(&self) -> (usize, usize) {
+        self.dec
+            .inputs()
+            .iter()
+            .find(|i| i.name() == "past_key_values.0.decoder.key")
+            .and_then(|i| i.dtype().tensor_shape().map(|s| s.to_vec()))
+            .map(|s| (s[1].max(1) as usize, s[3].max(1) as usize))
+            .unwrap_or((20, 64))
+    }
+}
+
+#[derive(Default)]
+struct Past {
+    dk: Vec<DynValue>,
+    dv: Vec<DynValue>,
+    ek: Vec<DynValue>,
+    ev: Vec<DynValue>,
+}
+
+impl Whisper {
+    fn detect_language(&mut self, x: &[f32]) -> Result<u32> {
+        let h = self.encode(x)?;
+        let (logits, _) = self.step(&[self.sot], &h, None)?;
+        self.langs
+            .iter()
+            .max_by(|a, b| logits[a.1 as usize].total_cmp(&logits[b.1 as usize]))
+            .map(|l| l.1)
+            .ok_or_else(|| anyhow!("no language tokens"))
+    }
+
+    /// Transcribe one window (≤ 30 s): timed segments relative to its start, and the mean log-probability.
+    fn window(&mut self, x: &[f32], lang: u32, cancel: &dyn Fn() -> bool) -> Result<(Vec<(f64, f64, String)>, f64)> {
+        let h = self.encode(x)?;
+        let (mut logits, past) = self.step(&[self.sot, lang, self.transcribe], &h, None)?;
+        let mut past = past.expect("prompt step returns the cache");
+        let secs = x.len() as f64 / WSR as f64;
+        let max_tokens = (secs * 6.0 + 24.0).min(220.0) as usize;
+        let (ts0, eot) = (self.ts0 as usize, self.eot as usize);
+        let ts_max = ts0 + (secs / 0.02).ceil() as usize; // no timestamp past the window's end
+        let mut toks: Vec<u32> = Vec::new();
+        let mut logp = Vec::new();
+        for _ in 0..max_tokens {
+            if cancel() { anyhow::bail!(crate::Cancelled); }
+            let lg: &mut Vec<f32> = &mut logits;
+            lg.truncate(self.vocab.max(lg.len()).min(lg.len()));
+            for i in eot + 1..ts0.min(lg.len()) { lg[i] = f32::NEG_INFINITY; } // never emit control tokens
+            for &i in &self.suppress { if (i as usize) < lg.len() { lg[i as usize] = f32::NEG_INFINITY; } }
+            for v in lg.iter_mut().skip(ts_max + 1) { *v = f32::NEG_INFINITY; }
+            let last_ts = toks.iter().rev().find(|t| **t as usize >= ts0).copied();
+            let n = toks.len();
+            if n == 0 {
+                for v in lg.iter_mut().take(ts0) { *v = f32::NEG_INFINITY; } // begin with a timestamp
+            } else {
+                let last_is_ts = toks[n - 1] as usize >= ts0;
+                let pair = last_is_ts && (n < 2 || toks[n - 2] as usize >= ts0);
+                if pair { for v in lg.iter_mut().skip(ts0) { *v = f32::NEG_INFINITY; } } // after a start: text
+                else if last_is_ts { for v in lg.iter_mut().take(eot) { *v = f32::NEG_INFINITY; } } // after an end: next start or the end
+                if let Some(t) = last_ts { for v in lg.iter_mut().take(t as usize).skip(ts0) { *v = f32::NEG_INFINITY; } } // monotonic
+            }
+            // softmax, and the timestamp rule: if all timestamps together beat the best text token, emit one
+            let max = lg.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut p: Vec<f64> = lg.iter().map(|v| ((v - max) as f64).exp()).collect();
+            let sum: f64 = p.iter().sum();
+            for v in &mut p { *v /= sum; }
+            if n > 0 && (toks[n - 1] as usize) < ts0 {
+                let ts_mass: f64 = p[ts0.min(p.len())..].iter().sum();
+                let text_best = p[..ts0.min(p.len())].iter().cloned().fold(0.0, f64::max);
+                if ts_mass > text_best {
+                    for v in p.iter_mut().take(ts0) { *v = 0.0; }
+                }
+            }
+            let (best, pb) = p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, v)| (i, *v)).unwrap_or((eot, 1.0));
+            logp.push(pb.max(1e-12).ln());
+            if best == eot { break; }
+            toks.push(best as u32);
+            // stop runaway repetition: the same 4-token phrase three times in a row
+            if toks.len() >= 12 {
+                let k = toks.len();
+                let a = &toks[k - 4..];
+                if &toks[k - 8..k - 4] == a && &toks[k - 12..k - 8] == a { toks.truncate(k - 8); break; }
+            }
+            logits = self.step(&[best as u32], &h, Some(&mut past))?.0;
+        }
+        let mut segs = Vec::new();
+        let mut cur: Option<(f64, Vec<u32>)> = None;
+        for t in toks {
+            if t as usize >= ts0 {
+                let ts = (t as usize - ts0) as f64 * 0.02;
+                match cur.take() {
+                    None => cur = Some((ts, Vec::new())),
+                    Some((s, text)) => segs.push((s, ts, self.tok.decode(&text).trim().to_string())),
+                }
+            } else if let Some((_, text)) = cur.as_mut() {
+                text.push(t);
+            }
+        }
+        if let Some((s, text)) = cur { if !text.is_empty() { segs.push((s, secs, self.tok.decode(&text).trim().to_string())); } }
+        let mean = if logp.is_empty() { 0.0 } else { logp.iter().sum::<f64>() / logp.len() as f64 };
+        Ok((segs, mean))
+    }
+}
+
+/// Windows of actual singing (16 kHz samples): voiced stretches merged across short gaps, padded a
+/// little, and split at the quietest point when longer than 28 s.
+fn singing_windows(x: &[f32]) -> Vec<(usize, usize)> {
+    let hop = WSR as usize / 20; // 50 ms
+    let rms: Vec<f32> = x.chunks(hop).map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt()).collect();
+    let peak = rms.iter().cloned().fold(0f32, f32::max);
+    if peak <= 1e-5 { return vec![]; }
+    let gate = peak * 0.05;
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < rms.len() {
+        if rms[i] > gate {
+            let s = i;
+            while i < rms.len() && rms[i] > gate { i += 1; }
+            match spans.last_mut() {
+                Some(last) if s - last.1 <= 16 => last.1 = i, // bridge gaps under 0.8 s
+                _ => spans.push((s, i)),
+            }
+        } else { i += 1; }
+    }
+    let mut out = Vec::new();
+    let max_frames = 28 * 20;
+    for (s, e) in spans {
+        if e - s < 4 { continue; } // under 0.2 s: a breath or a click
+        let (s, e) = (s.saturating_sub(4), (e + 4).min(rms.len()));
+        let mut a = s;
+        while e - a > max_frames {
+            // cut at the quietest frame in the second half of the allowed span
+            let lo = a + max_frames / 2;
+            let cut = (lo..a + max_frames).min_by(|p, q| rms[*p].total_cmp(&rms[*q])).unwrap_or(a + max_frames);
+            out.push((a * hop, cut * hop));
+            a = cut;
+        }
+        out.push((a * hop, (e * hop).min(x.len())));
+    }
+    out
+}
+
+/// Clean one decoded line: drop noise tags ("[Music]", "(laughs)", "♪") and empty text.
+fn clean(text: &str) -> Option<String> {
+    let mut t = String::new();
+    let mut depth = 0;
+    for c in text.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            '♪' | '♫' => {}
+            _ if depth == 0 => t.push(c),
+            _ => {}
+        }
+    }
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let letters = t.chars().filter(|c| c.is_alphanumeric()).count();
+    (letters >= 2).then_some(t)
+}
+
+
+// ───────────────────────── timing refinement (from the vocal itself) ─────────────────────────
+
+/// 10 ms energy envelope (log) and onset strength (rises in energy) of 16 kHz audio.
+fn envelope(x: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let hop = WSR as usize / 100;
+    let e: Vec<f32> = x.chunks(hop).map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32 + 1e-10).sqrt()).collect();
+    let lg: Vec<f32> = e.iter().map(|v| (v + 1e-6).ln()).collect();
+    let on: Vec<f32> = (0..lg.len()).map(|i| if i < 2 { 0.0 } else { (lg[i] - lg[i - 2]).max(0.0) }).collect();
+    (e, on)
+}
+
+/// Snap each line to where singing really starts and ends, split run-on lines at a breath, and place
+/// words on the vocal's onsets.
+fn refine(lines: Vec<Line>, x16: &[f32]) -> Vec<Line> {
+    let (e, on) = envelope(x16);
+    let fr = |t: f64| ((t * 100.0).max(0.0) as usize).min(e.len().saturating_sub(1));
+    let mut out = Vec::new();
+    for l in lines {
+        let (a, b) = (fr(l.start - 0.3), fr(l.end + 0.3));
+        if b <= a + 2 { out.push(l); continue; }
+        let peak = e[a..=b].iter().cloned().fold(0f32, f32::max);
+        let gate = peak * 0.12;
+        let first = (fr(l.start - 0.3)..=fr(l.start + 0.6).min(b)).find(|&i| e[i] > gate);
+        let last = (fr(l.end - 0.6).max(a)..=b).rev().find(|&i| e[i] > gate);
+        let (mut s0, mut e0) = (l.start, l.end);
+        if let (Some(f), Some(g)) = (first, last) { if g > f { s0 = f as f64 / 100.0; e0 = (g + 1) as f64 / 100.0; } }
+        // split a run-on line at its longest breath (≥ 0.25 s below the gate) near the middle
+        let words: Vec<String> = l.text.split_whitespace().map(String::from).collect();
+        let mut pieces: Vec<(f64, f64, Vec<String>)> = vec![(s0, e0, words.clone())];
+        if (e0 - s0 > 7.0 || words.len() > 12) && words.len() >= 4 {
+            let (fa, fb) = (fr(s0 + (e0 - s0) * 0.25), fr(s0 + (e0 - s0) * 0.75));
+            let mut best: Option<(usize, usize)> = None; // (gap start, length)
+            let mut i = fa;
+            while i < fb {
+                if e[i] < gate {
+                    let j = (i..fb).find(|&k| e[k] >= gate).unwrap_or(fb);
+                    if j - i >= 25 && best.map(|(_, n)| j - i > n).unwrap_or(true) { best = Some((i, j - i)); }
+                    i = j;
+                } else { i += 1; }
+            }
+            if let Some((g, n)) = best {
+                let (cut_a, cut_b) = (g as f64 / 100.0, (g + n) as f64 / 100.0);
+                // words before the breath, by syllable share
+                let syl: Vec<f64> = words.iter().map(|w| syllables(w)).collect();
+                let tot: f64 = syl.iter().sum();
+                let share = (cut_a - s0) / (e0 - s0);
+                let mut acc = 0.0;
+                let mut k = 0;
+                while k < words.len() - 1 && (acc + syl[k] / 2.0) / tot < share { acc += syl[k]; k += 1; }
+                let k = k.clamp(1, words.len() - 1);
+                pieces = vec![(s0, cut_a, words[..k].to_vec()), (cut_b, e0, words[k..].to_vec())];
+            }
+        }
+        for (ps, pe, ws) in pieces {
+            let text = ws.join(" ");
+            let mut wds = words_estimate(ps, pe, &text);
+            // Place words on the vocal's syllable onsets by ORDER, not by estimated time (sung rhythm is
+            // uneven): word k belongs at the onset whose position in the onset sequence matches the share
+            // of syllables before word k. An exact monotonic alignment (dynamic programming) picks them.
+            let n = wds.len();
+            if n > 1 {
+                let (fa, fb) = (fr(ps), fr(pe));
+                let top = on[fa..=fb].iter().cloned().fold(0f32, f32::max);
+                let mut cand: Vec<(usize, f32)> = Vec::new();
+                for f in fa + 1..fb {
+                    let v = on[f];
+                    if v < top * 0.25 || f < fa + 6 { continue; }
+                    let local = (f.saturating_sub(3)..=(f + 3).min(fb)).all(|g| on[g] <= v);
+                    if !local { continue; }
+                    match cand.last_mut() {
+                        Some(last) if f - last.0 < 6 => { if v > last.1 { *last = (f, v); } }
+                        _ => cand.push((f, v)),
+                    }
+                }
+                let m = cand.len();
+                if m + 1 >= n {
+                    let syl: Vec<f64> = wds.iter().map(|w| syllables(&w.text)).collect();
+                    let tot: f64 = syl.iter().sum();
+                    let p: Vec<f64> = (1..n).map(|k| syl[..k].iter().sum::<f64>() / tot).collect(); // share before word k
+                    let q: Vec<f64> = (0..m).map(|j| (j + 1) as f64 / (m + 1) as f64).collect();
+                    let cost = |k: usize, j: usize| -(cand[j].1 / top) as f64 + 2.0 * (p[k] - q[j]).abs();
+                    // best[k][j]: words 1..=k+1 placed, word k+1 at candidate j
+                    let w = n - 1;
+                    let mut best = vec![vec![f64::INFINITY; m]; w];
+                    let mut from = vec![vec![usize::MAX; m]; w];
+                    for j in 0..m { best[0][j] = cost(0, j); }
+                    for k in 1..w {
+                        let mut run = (f64::INFINITY, usize::MAX); // best over j' < j
+                        for j in 0..m {
+                            if j > 0 && best[k - 1][j - 1] < run.0 { run = (best[k - 1][j - 1], j - 1); }
+                            if run.1 != usize::MAX { best[k][j] = run.0 + cost(k, j); from[k][j] = run.1; }
+                        }
+                    }
+                    if let Some((mut j, _)) = best[w - 1].iter().enumerate().filter(|(_, v)| v.is_finite()).min_by(|a, b| a.1.total_cmp(b.1)) {
+                        for k in (0..w).rev() {
+                            wds[k + 1].start = cand[j].0 as f64 / 100.0;
+                            if k > 0 { j = from[k][j]; }
+                        }
+                    }
+                }
+                wds[0].start = ps;
+            }
+            for k in 0..n { wds[k].end = if k + 1 < n { wds[k + 1].start } else { pe }; }
+            out.push(Line { start: ps, end: pe, text, words: wds });
+        }
+    }
+    out
+}
+fn syllables(w: &str) -> f64 {
+    let mut n = 0;
+    let mut prev = false;
+    for c in w.chars() {
+        let v = "aeiouyAEIOUYàáâãäåèéêëìíîïòóôõöùúûü".contains(c) || !c.is_ascii();
+        if v && !prev { n += 1; }
+        prev = v;
+    }
+    n.max(1) as f64
+}
+
+/// Word timings inside a line, from syllable estimates (vowel groups).
+fn words_estimate(start: f64, end: f64, text: &str) -> Vec<Word> {
+    let ws: Vec<&str> = text.split_whitespace().collect();
+    let weight = |w: &str| {
+        let mut n = 0;
+        let mut prev = false;
+        for c in w.chars() {
+            let v = "aeiouyAEIOUYàáâãäåèéêëìíîïòóôõöùúûüাািীুূেৈোৌअआइईउऊएऐओऔािीुूेैोौ".contains(c) || !c.is_ascii();
+            if v && !prev { n += 1; }
+            prev = v;
+        }
+        n.max(1) as f64
+    };
+    let total: f64 = ws.iter().map(|w| weight(w)).sum::<f64>().max(1.0);
+    let mut t = start;
+    ws.iter()
+        .map(|w| {
+            let d = (end - start) * weight(w) / total;
+            let wd = Word { start: t, end: t + d, text: w.to_string() };
+            t += d;
+            wd
+        })
+        .collect()
+}
+
+/// Transcribe a separated vocal (44.1 kHz) into timed lyric lines. `language` like "en", or `None`
+/// to detect it. `progress` gets 0…1.
+pub fn transcribe(vocals: &Stereo, models_dir: &Path, language: Option<&str>, progress: &dyn Fn(f32), cancel: &dyn Fn() -> bool) -> Result<Lyrics> {
+    let mono: Vec<f32> = vocals[0].iter().zip(&vocals[1]).map(|(l, r)| 0.5 * (l + r)).collect();
+    let x16 = crate::audio::resample(&[mono.clone(), mono], SR, WSR)?[0].clone();
+    let wins = singing_windows(&x16);
+    let mut w = Whisper::load(models_dir)?;
+    if wins.is_empty() { return Ok(Lyrics { language: language.unwrap_or("").into(), lines: vec![] }); }
+    let lang = match language.and_then(|l| w.langs.iter().find(|x| x.0 == l).map(|x| x.1)) {
+        Some(id) => id,
+        None => {
+            // detect on the longest window of singing
+            let (a, b) = *wins.iter().max_by_key(|(a, b)| b - a).unwrap();
+            w.detect_language(&x16[a..b.min(a + CHUNK)])?
+        }
+    };
+    let lang_name = w.langs.iter().find(|x| x.1 == lang).map(|x| x.0.clone()).unwrap_or_default();
+    let mut lines = Vec::new();
+    for (k, &(a, b)) in wins.iter().enumerate() {
+        progress(k as f32 / wins.len() as f32);
+        let (segs, mean) = w.window(&x16[a..b], lang, cancel)?;
+        if mean < -1.2 { continue; } // too unsure: more likely invented than heard
+        let off = a as f64 / WSR as f64;
+        for (s, e, text) in segs {
+            if let Some(t) = clean(&text) {
+                let (s, e) = (off + s, off + e.max(s + 0.2));
+                if lines.last().map(|l: &Line| l.text == t && s - l.end < 1.0).unwrap_or(false) { continue; } // a duplicate echo
+                lines.push(Line { start: s, end: e, words: words_estimate(s, e, &t), text: t });
+            }
+        }
+    }
+    progress(1.0);
+    Ok(Lyrics { language: lang_name, lines: refine(lines, &x16) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn windows_skip_silence_and_respect_the_length_limit() {
+        let mut x = vec![0f32; WSR as usize * 70];
+        let tone = |x: &mut Vec<f32>, a: f32, b: f32| for i in (a * WSR as f32) as usize..(b * WSR as f32) as usize { x[i] = 0.3 * (i as f32 * 0.05).sin(); };
+        tone(&mut x, 2.0, 6.0);
+        tone(&mut x, 6.5, 9.0);   // a short gap: same window
+        tone(&mut x, 15.0, 55.0); // 40 s of singing: split
+        let w = singing_windows(&x);
+        let secs: Vec<(f32, f32)> = w.iter().map(|(a, b)| (*a as f32 / WSR as f32, *b as f32 / WSR as f32)).collect();
+        assert!(secs[0].0 < 2.0 && secs[0].1 > 9.0 && secs[0].1 < 10.0, "first window {:?}", secs[0]);
+        assert!(secs.iter().all(|(a, b)| b - a <= 28.5), "a window is too long: {secs:?}");
+        assert!(secs.iter().all(|(a, b)| !(a > &9.5 && b < &14.5)), "silence became a window: {secs:?}");
+        assert!(secs.last().unwrap().1 >= 55.0 && secs.last().unwrap().1 < 56.0);
+    }
+    /// A "vocal" whose syllables start at known times, and a line whose even-split estimate is off.
+    /// Each syllable: a quick attack, then a gently fading held note, until `len` seconds (or just
+    /// before the next syllable).
+    fn sung_with(starts: &[f64], end: f64, len: f64) -> Vec<f32> {
+        let n = (end * WSR as f64) as usize + WSR as usize;
+        let mut x = vec![0f32; n];
+        for (k, s) in starts.iter().enumerate() {
+            let stop = (starts.get(k + 1).copied().unwrap_or(end + 0.04) - 0.04).min(s + len);
+            for i in (s * WSR as f64) as usize..(stop * WSR as f64) as usize {
+                let t = i as f32 / WSR as f32 - *s as f32;
+                x[i] = 0.4 * (1.0 - (-t * 60.0).exp()) * (-t * 0.5).exp() * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+            }
+        }
+        x
+    }
+    fn sung(starts: &[f64], end: f64) -> Vec<f32> { sung_with(starts, end, 10.0) }
+    #[test]
+    fn words_land_on_the_sung_syllables() {
+        // uneven rhythm: short pickup words, then a long held word
+        let starts = [1.00, 1.18, 1.36, 1.55, 2.60, 2.85];
+        let x = sung(&starts, 4.2);
+        let line = Line { start: 0.9, end: 4.3, text: "oh my love you are mine".into(), words: words_estimate(0.9, 4.3, "oh my love you are mine") };
+        let even: f64 = line.words.iter().zip(&starts).skip(1).map(|(w, s)| (w.start - s).abs()).sum::<f64>() / 5.0;
+        let out = refine(vec![line], &x);
+        let l = &out[0];
+        assert!((l.start - 1.0).abs() < 0.05 && (l.end - 4.2).abs() < 0.12, "line snapped to the singing: {:.2}–{:.2}", l.start, l.end);
+        let refined: f64 = l.words.iter().zip(&starts).skip(1).map(|(w, s)| (w.start - s).abs()).sum::<f64>() / 5.0;
+        assert!(refined < 0.06 && refined < even / 3.0, "mean word-start error: even split {even:.3}s → refined {refined:.3}s");
+    }
+    #[test]
+    fn a_run_on_line_splits_at_the_breath() {
+        let mut starts: Vec<f64> = (0..7).map(|k| 1.0 + k as f64 * 0.45).collect();
+        starts.extend((0..7).map(|k| 5.6 + k as f64 * 0.45));
+        let x = sung_with(&starts, 8.8, 0.4);
+        let text = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen";
+        let out = refine(vec![Line { start: 1.0, end: 8.8, text: text.into(), words: words_estimate(1.0, 8.8, text) }], &x);
+        assert_eq!(out.len(), 2, "split into two lines: {:?}", out.iter().map(|l| &l.text).collect::<Vec<_>>());
+        assert!(out[0].end < 4.4 && out[1].start > 5.4, "split at the breath: {:.2} / {:.2}", out[0].end, out[1].start);
+        assert_eq!(out[0].words.len() + out[1].words.len(), 14);
+    }
+    #[test]
+    fn noise_tags_are_removed() {
+        assert_eq!(clean("[Music]"), None);
+        assert_eq!(clean("♪ Hold me tight ♪"), Some("Hold me tight".into()));
+        assert_eq!(clean("Go on (go on), hold me"), Some("Go on , hold me".into()));
+    }
+}

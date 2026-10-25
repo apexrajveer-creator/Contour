@@ -1,0 +1,19 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Contour",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 980,
+        "minHeight": 640,
+        "dragDropEnabled": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "backgroundColor": "#050a16"
+      }
+    ]
+  }
+}
