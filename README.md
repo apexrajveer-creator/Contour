@@ -7,6 +7,8 @@
 **Split any song into stems. Sing it. Remix it. Mix it beautifully.**<br>
 All on your own computer. Nothing is ever uploaded.
 
+<sub>An Echelon product. Created by Rajveer Raj.</sub>
+
 [![Download](https://img.shields.io/github/v/release/apexrajveer-creator/contour?label=download&color=8db8f0)](https://github.com/apexrajveer-creator/contour/releases/latest)
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-4fd1c5)](#system-requirements)
 [![License](https://img.shields.io/github/license/apexrajveer-creator/contour?color=9aa6b8)](LICENSE)
@@ -186,6 +188,6 @@ Full notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## License
 
-Contour's own source code is released under the [MIT License](LICENSE). Models and libraries keep their own licenses (above).
+Contour is an Echelon product, created by Rajveer Raj. Its own source code is released under the [MIT License](LICENSE). Models and libraries keep their own licenses (above).
 
-<div align="center"><sub>Made with care for people who love music.</sub></div>
+<div align="center"><sub>An Echelon product. Created by Rajveer Raj.</sub></div>

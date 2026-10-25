@@ -12,10 +12,7 @@
 <canvas id="pattern-waves" aria-hidden="true"></canvas>
 <div class="app">
   <header class="bar">
-    <div class="brand">
-      <img class="app-icon" src="icon.png" alt="" width="26" height="26">
-      <span>Contour</span>
-    </div>
+    <div class="brand"><span class="brand-name">Contour</span><canvas class="brand-wave" id="brand-wave" aria-hidden="true"></canvas></div>
     <div class="now" id="now"><span id="now-name">No song loaded</span><span class="now-sub"><span id="now-meta"></span><span class="status" id="status" role="status" aria-live="polite">Ready</span></span></div>
     <div class="bar-right">
       <div class="mode rubber" role="radiogroup" aria-label="Interface mode">
@@ -381,6 +378,10 @@
       <div id="models-table"></div>
     </section>
     <div class="sheet-foot"><span class="dim" id="models-total"></span><button class="primary" id="download-all">Download all</button></div>
+    <footer class="credit">
+      <img src="echelon.png" alt="Echelon" width="46" height="40">
+      <div><strong>An Echelon product</strong><span>Created by Rajveer Raj</span></div>
+    </footer>
   </div>
 </div>
 <div class="setup" id="setup" hidden>
@@ -436,5 +437,6 @@
 <script src="sound.js"></script>
 <script src="livetune.js"></script>
 <script src="polish.js"></script>
+<script src="brand-wave.js"></script>
 </body>
 </html>

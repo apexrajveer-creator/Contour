@@ -413,3 +413,16 @@ header.bar #now-name.unsaved:after{position:absolute;right:2px;top:50%;margin:0;
 /* ══════════ No default scrollbars anywhere: scrolling stays (wheel, trackpad, touch, keys) ══════════ */
 *{scrollbar-width:none!important}
 *::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
+
+
+/* ══════════ Header wordmark and its live wave ══════════ */
+header.bar .brand{display:flex;align-items:center;gap:12px}
+.brand-name{font:650 17px/1 var(--display);letter-spacing:-.015em;color:var(--bone)}
+.brand-wave{display:block;width:76px;height:22px}
+
+/* ══════════ Settings: who made it ══════════ */
+.credit{display:flex;align-items:center;gap:14px;margin-top:22px;padding-top:18px;border-top:1px solid rgba(173,205,250,.1)}
+.credit img{width:46px;height:auto;opacity:.92}
+.credit div{display:grid;gap:2px}
+.credit strong{font:600 13px var(--display);color:var(--bone);letter-spacing:.01em}
+.credit span{font-size:12px;color:var(--mute)}
