@@ -4,7 +4,7 @@
 
 # Contour
 
-**Split any song into stems. Sing it. Remix it. Mix it beautifully.**<br>
+**Split any song into stems. Sing it. Play it. Mix it.**<br>
 All on your own computer. Nothing is ever uploaded.
 
 <sub>An Echelon product. Created by Rajveer Raj.</sub>
