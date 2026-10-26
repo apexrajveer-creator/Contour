@@ -202,6 +202,7 @@
       store['rec_' + k] = [ch, ch];
       return { id: 'rec_' + k, label: 'Recording ' + k, kind: 'lane', leaf: true, peaks: peaks(store['rec_' + k]) };
     },
+    sync_stem: async ({ id }) => { await new Promise(r => setTimeout(r, 250)); store.__orig = store.__orig || {}; store.__orig[id] = store.__orig[id] || store[id]; return { stem: { id, label: id, kind: 'stem', leaf: true, peaks: peaks(store[id]) }, moved: 12 }; },
     models_list: () => MODELS, models_required: ({ request }) => MODELS.filter(m => (request.quality === 'max' ? m.id === 'mel_roformer' : m.id === 'voc_ft') || (request.lead_backing && m.id === 'kara_2') || (request.dereverb && m.id === 'reverb_hq') || (request.instruments === 'four' && m.id === 'htdemucs') || (request.instruments === 'six' && m.id === 'htdemucs_6s')),
     models_download: async ({ ids }) => { await new Promise(r => setTimeout(r, 600)); MODELS.filter(m => ids.includes(m.id)).forEach(m => m.present = true); }, models_delete: () => null,
     pcm: ({ id, depth }) => {

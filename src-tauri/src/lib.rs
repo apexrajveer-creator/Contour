@@ -44,8 +44,10 @@ struct Inner {
     last_request: Option<Request>,
     /// Pitch tracks (10 ms frames) of recent audio, keyed by the audio's identity. Bounded: at most 4.
     pitch_cache: Vec<(usize, Arc<Vec<f32>>)>,
-    /// The untouched audio of stems that were levelled out, for "Restore original".
+    /// The untouched audio of stems that were levelled out or synced, for "Restore original".
     originals: std::collections::HashMap<String, Arc<Stereo>>,
+    /// The song's beat grid (seconds), keyed by the mix's identity: computed once for Sync to beat.
+    song_beats: Option<(usize, Arc<Vec<f64>>)>,
     /// Stems as they were before a Sing key change (every change starts from these; key 0 restores them).
     key_originals: std::collections::HashMap<String, Arc<Stereo>>,
 }
@@ -1093,7 +1095,7 @@ async fn level_stem(state: State<'_, AppState>, id: String) -> CmdResult<StemInf
     let (audio, label) = {
         let inner = state.inner.lock().unwrap();
         let s = inner.stems.iter().find(|s| s.id == id).ok_or("That stem is gone.")?;
-        (inner.originals.get(&id).cloned().unwrap_or_else(|| s.audio.clone()), s.label.clone())
+        (s.audio.clone(), s.label.clone())
     };
     let levelled = tauri::async_runtime::spawn_blocking(move || contour_engine::fx::level(&audio)).await.map_err(err)?;
     let info = StemInfo { id: id.clone(), label, kind: "stem", leaf: true, peaks: audio::peaks(&levelled, PEAK_COLS) };
@@ -1190,6 +1192,45 @@ async fn sing_transpose(app: AppHandle, state: State<'_, AppState>, semitones: i
     }
     if semitones == 0 { inner.key_originals.clear(); }
     Ok(infos)
+}
+
+
+#[derive(Serialize)]
+struct SyncResult {
+    stem: StemInfo,
+    /// How many hits were moved onto the beat (0: it was already in time).
+    moved: usize,
+}
+
+/// "Sync to beat": pull a lane's hits onto the song's beat grid. The original is kept for
+/// `restore_stem`.
+#[tauri::command]
+async fn sync_stem(state: State<'_, AppState>, id: String) -> CmdResult<SyncResult> {
+    let (audio, label, mix, cached) = {
+        let inner = state.inner.lock().unwrap();
+        let s = inner.stems.iter().find(|s| s.id == id).ok_or("That stem is gone.")?;
+        let src = inner.source.as_ref().ok_or("Import a song first.")?;
+        let key = Arc::as_ptr(&src.mix) as usize;
+        let cached = inner.song_beats.as_ref().filter(|(k, _)| *k == key).map(|(_, b)| b.clone());
+        (s.audio.clone(), s.label.clone(), src.mix.clone(), cached)
+    };
+    let key = Arc::as_ptr(&mix) as usize;
+    let (synced, moved, beats) = tauri::async_runtime::spawn_blocking(move || {
+        let beats = cached.unwrap_or_else(|| Arc::new(contour_engine::analysis::rhythm(&mix, None).1));
+        let (out, moved) = contour_engine::sync::sync_to_beats(&audio, &beats);
+        (out, moved, beats)
+    })
+    .await
+    .map_err(err)?;
+    let info = StemInfo { id: id.clone(), label, kind: "stem", leaf: true, peaks: audio::peaks(&synced, PEAK_COLS) };
+    let mut inner = state.inner.lock().unwrap();
+    inner.song_beats = Some((key, beats));
+    if moved > 0 {
+        let prev = inner.stems.iter().find(|s| s.id == id).map(|s| s.audio.clone());
+        if let Some(p) = prev { inner.originals.entry(id.clone()).or_insert(p); }
+        if let Some(s) = inner.stems.iter_mut().find(|s| s.id == id) { s.audio = Arc::new(synced); }
+    }
+    Ok(SyncResult { stem: info, moved })
 }
 
 // ───────────────────────────── first-run setup ─────────────────────────────
@@ -1795,6 +1836,7 @@ pub fn run() {
             transcribe_lyrics,
             cancel_lyrics,
             level_stem,
+            sync_stem,
             restore_stem,
             add_recording,
             sing_transpose

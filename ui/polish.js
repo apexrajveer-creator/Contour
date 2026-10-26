@@ -228,5 +228,49 @@
     bar.style.setProperty('grid-template-columns', room >= need ? `${side}px minmax(0,1fr) ${side}px` : 'auto minmax(0,1fr) auto', 'important');
   };
   if (bar) { const nowEl0 = bar.querySelector('.now'); if (nowEl0) new MutationObserver(centreTitle).observe(nowEl0, { childList: true, characterData: true, subtree: true }); new ResizeObserver(centreTitle).observe(bar); new ResizeObserver(centreTitle).observe(rightEl); new ResizeObserver(centreTitle).observe(brandEl); centreTitle(); }
+  // ── tooltips in Contour's style: native title tooltips are replaced by a glass label ──
+  // A short delay before showing, gone on press, scroll or leave; kept inside the window. The text
+  // moves to data-tip (and aria-label when there isn't one), so screen readers still get it.
+  const tip = document.createElement('div');
+  tip.className = 'ctip'; tip.setAttribute('role', 'tooltip'); tip.hidden = true;
+  document.body.append(tip);
+  let tipFor = null, tipTimer = 0;
+  const adopt = el => {
+    const t = el.getAttribute('title');
+    if (!t) return;
+    el.dataset.tip = t;
+    if (!el.hasAttribute('aria-label') && !el.textContent.trim()) el.setAttribute('aria-label', t);
+    el.removeAttribute('title');
+  };
+  const hideTip = () => { clearTimeout(tipTimer); tipFor = null; tip.classList.remove('show'); setTimeout(() => { if (!tipFor) tip.hidden = true; }, 160); };
+  const showTip = el => {
+    const text = el.dataset.tip;
+    if (!text || !el.isConnected) return;
+    const m = text.match(/^(.*?)\s*\(([^()]{1,14})\)$/); // "Record … (R)" → a key cap
+    tip.innerHTML = '';
+    tip.append(document.createTextNode(m ? m[1] : text));
+    if (m) { const k = document.createElement('kbd'); k.textContent = m[2]; tip.append(k); }
+    tip.hidden = false;
+    const r = el.getBoundingClientRect(), w = tip.offsetWidth, hgt = tip.offsetHeight;
+    let x = r.left + r.width / 2 - w / 2, y = r.top - hgt - 8;
+    if (y < 6) y = r.bottom + 8; // no room above: below
+    x = Math.max(8, Math.min(innerWidth - w - 8, x));
+    tip.style.left = `${Math.round(x)}px`; tip.style.top = `${Math.round(y)}px`;
+    requestAnimationFrame(() => tip.classList.add('show'));
+  };
+  document.addEventListener('mouseover', e => {
+    const el = e.target.closest?.('[title], [data-tip]');
+    if (!el || el === tipFor) return;
+    if (el.hasAttribute('title')) adopt(el);
+    hideTip();
+    tipFor = el;
+    tipTimer = setTimeout(() => tipFor === el && showTip(el), 450);
+  });
+  document.addEventListener('mouseout', e => { if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip(); });
+  ['mousedown', 'wheel', 'keydown'].forEach(ev => document.addEventListener(ev, hideTip, { passive: true, capture: true }));
+  document.addEventListener('scroll', hideTip, { passive: true, capture: true });
+
+  // ── the wordmark knows when music plays ──
+  setInterval(() => document.documentElement.classList.toggle('playing', typeof S !== 'undefined' && !!S.playing), 200);
   window.ContourPalette = { open, close, commands: C, kind };
 })();

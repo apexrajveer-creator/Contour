@@ -115,7 +115,7 @@ async function listMics() {
 async function startSinging() {
   if (!S.source || S.busy) return;
   if (!hasVocals()) {
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
+    await separate({ quality: 'fast', lead_backing: false, instruments: 'none', dereverb: false }); // Sing always uses the fast model
     if (!hasVocals()) return; // cancelled or failed
     setMode('karaoke');
   }
@@ -364,6 +364,7 @@ function tuneSettings() {
 const speedLabel = v => (v >= 96 ? 'Robotic' : v >= 75 ? 'Tight' : v >= 30 ? 'Natural' : 'Gentle');
 function scheduleTune(delay = 220) { clearTimeout(TUNE.timer); TUNE.timer = setTimeout(runTune, delay); }
 async function runTune() {
+  if (!track('take')?.buffer) return; // restored settings or a stray slider event: nothing to tune yet
   const rev = ++TUNE.rev;
   if (TUNE.running) { TUNE.again = true; return; }
   TUNE.running = true;
@@ -466,7 +467,7 @@ async function importTake() {
   const path = await invoke('pick_audio');
   if (!path) return;
   if (!hasVocals()) {
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
+    await separate({ quality: 'fast', lead_backing: false, instruments: 'none', dereverb: false }); // Sing always uses the fast model
     if (!hasVocals()) return;
   }
   busyStart('Lining up your take');
@@ -640,7 +641,7 @@ async function getLyrics({ auto = false } = {}) {
   if (LY.running) return;
   if (!hasVocals()) {
     if (auto) return; // automatic runs wait for the vocals; they start right after separation
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
+    await separate({ quality: 'fast', lead_backing: false, instruments: 'none', dereverb: false }); // Sing always uses the fast model
     if (!hasVocals()) return;
     setMode('karaoke');
   }

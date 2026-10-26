@@ -418,7 +418,6 @@ header.bar #now-name.unsaved:after{position:absolute;right:2px;top:50%;margin:0;
 /* ══════════ Header wordmark and its live wave ══════════ */
 header.bar .brand{display:flex;align-items:center;gap:12px}
 .brand-name{font:650 17px/1 var(--display);letter-spacing:-.015em;color:var(--bone)}
-.brand-wave{display:block;width:76px;height:22px}
 
 /* ══════════ Settings: who made it ══════════ */
 .credit{display:flex;align-items:center;gap:14px;margin-top:22px;padding-top:18px;border-top:1px solid rgba(173,205,250,.1)}
@@ -429,3 +428,28 @@ header.bar .brand{display:flex;align-items:center;gap:12px}
 
 /* even side padding, so the centred title is centred on the window to the pixel */
 header.bar{padding-left:18px!important;padding-right:18px!important}
+
+
+/* ══════════ The wordmark flows with the icon's colours while music plays ══════════ */
+@property --w1{syntax:'<color>';inherits:false;initial-value:#e9f1fb}
+@property --w2{syntax:'<color>';inherits:false;initial-value:#e9f1fb}
+@property --w3{syntax:'<color>';inherits:false;initial-value:#e9f1fb}
+header.bar .brand-name{background:linear-gradient(90deg,var(--w1),var(--w2),var(--w3),var(--w2),var(--w1));background-size:300% 100%;
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  transition:--w1 900ms ease,--w2 900ms ease,--w3 900ms ease;animation:brand-flow 7s linear infinite;animation-play-state:paused}
+html.playing header.bar .brand-name{--w1:#a6ecff;--w2:#4ea6ff;--w3:#b383ff;animation-play-state:running}
+@keyframes brand-flow{to{background-position:300% 0}}
+@media(prefers-reduced-motion:reduce){header.bar .brand-name{animation:none}}
+
+/* ══════════ Rec matches the other transport pills ══════════ */
+footer.transport .rec-btn i{display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:#f28c8c;vertical-align:1px;box-shadow:0 0 6px rgba(242,140,140,.5)}
+footer.transport .rec-btn.live,footer.transport .rec-btn[aria-pressed=true]{border-color:rgba(242,140,140,.55);background:rgba(242,140,140,.14);color:#fff}
+
+/* ══════════ Tooltips in Contour's own style ══════════ */
+.ctip{position:fixed;z-index:120;max-width:280px;padding:7px 11px;border-radius:9px;pointer-events:none;
+  font:500 12px/1.35 var(--ui,inherit);color:#e9f1fb;background:rgba(12,22,40,.92);border:1px solid rgba(173,205,250,.16);
+  box-shadow:0 10px 30px rgba(0,4,12,.5);backdrop-filter:blur(18px) saturate(150%);-webkit-backdrop-filter:blur(18px) saturate(150%);
+  opacity:0;transform:translateY(3px);transition:opacity 140ms ease,transform 160ms cubic-bezier(.2,.9,.3,1)}
+.ctip.show{opacity:1;transform:none}
+.ctip kbd{font:600 11px var(--ui,inherit);padding:1px 5px;margin-left:4px;border-radius:4px;background:rgba(173,205,250,.12);color:var(--mute)}
+@media(prefers-reduced-motion:reduce){.ctip{transition:none}}

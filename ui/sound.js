@@ -49,8 +49,10 @@
         ${row('width', 'Width', 0, 100, Math.round(t.fx.width * 100), width(t.fx.width), '50 = as recorded; left narrows, right widens')}
       </div>
       <div class="fx-actions">
-        <button type="button" class="ghost fx-level-out" title="Even out loud and quiet parts so the whole stem sits at one volume">${t.levelled ? 'Restore original' : 'Level out'}</button>
-        <button type="button" class="ghost fx-reset">Reset</button>
+        <button type="button" class="ghost fx-level-out" title="Even out loud and quiet parts so the whole stem sits at one volume">Level out</button>
+        <button type="button" class="ghost fx-sync" ${syncable(t) ? 'title="Pull this lane\'s hits onto the song\'s beat"' : 'disabled title="Separated stems are already in time with the song"'}>Sync to beat</button>
+        ${t.modified ? '<button type="button" class="ghost fx-restore" title="Undo Level out and Sync to beat">Restore original</button>' : ''}
+        <button type="button" class="ghost fx-reset" title="Every knob back to neutral">Reset</button>
       </div>`;
     const sliders = el.querySelectorAll('input[type=range]');
     sliders.forEach(s => {
@@ -92,7 +94,9 @@
     el._restore = () => { if (before) { setFx(t, before, false); before = null; } };
     el.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); el._toggle?.(); } });
     el.querySelector('.fx-reset').onclick = () => { setFx(t, { ...NEUTRAL }); sync(); markPresets(); };
-    el.querySelector('.fx-level-out').onclick = e => levelOut(t, e.currentTarget);
+    el.querySelector('.fx-level-out').onclick = e => audioAction(t, e.currentTarget, 'level');
+    el.querySelector('.fx-sync').onclick = e => audioAction(t, e.currentTarget, 'sync');
+    el.querySelector('.fx-restore')?.addEventListener('click', e => audioAction(t, e.currentTarget, 'restore'));
     // a live meter for the stem, with the sweet spot shaded
     const bar = el.querySelector('.fx-meter i'), peak = el.querySelector('.fx-meter b');
     let hold = 0;
@@ -113,22 +117,28 @@
   const width = v => (Math.abs(v - 0.5) < 0.005 ? 'as is' : `${Math.round(v * 200)}%`);
   const fmtDb = v => (v === -Infinity ? '−∞' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(1)} dB`);
 
-  /** Level out (or restore): the engine renders it, so preview, waveform and export agree. */
-  async function levelOut(t, btn) {
-    if (S.busy) return;
+  /** Recordings, added audio and takes can be synced; separated stems are already in time. */
+  const syncable = t => /^(rec_|lane_|take)/.test(t.id);
+  /** Level out, Sync to beat, Restore original: rendered by the engine, so preview, waveform and export agree. */
+  async function audioAction(t, btn, kind) {
+    if (S.busy || btn.disabled) return;
+    const label = btn.textContent;
     btn.disabled = true;
-    const was = btn.textContent;
-    btn.textContent = t.levelled ? 'Restoring…' : 'Levelling…';
+    btn.textContent = { level: 'Levelling…', sync: 'Syncing…', restore: 'Restoring…' }[kind];
     try {
-      const info = await invoke(t.levelled ? 'restore_stem' : 'level_stem', { id: t.id });
+      const res = await invoke(kind === 'level' ? 'level_stem' : kind === 'sync' ? 'sync_stem' : 'restore_stem', { id: t.id });
+      const info = res.stem || res;
+      if (kind === 'sync' && !res.moved) { status?.(`${t.label} is already on the beat`); return; }
       const buf = await fetchBuffer(t, () => true);
       if (buf) { t.buffer = buf; t.peaks = info.peaks; t.hires = null; scheduleAnalysis?.(t); }
-      t.levelled = !t.levelled;
-      renderAll(); if (S.playing) restart();
+      t.modified = kind !== 'restore';
+      S.mode === 'studio' ? renderStudio() : renderSimple();
+      renderAll?.(); if (S.playing) restart();
       ContourProduct.audioChanged?.();
-      status?.(t.levelled ? `${t.label} levelled out` : `${t.label} restored`);
-    } catch (e) { toast(String(e)); btn.textContent = was; } finally { btn.disabled = false; }
+      status?.(kind === 'level' ? `${t.label} levelled out` : kind === 'sync' ? `${t.label}: ${res.moved} hit${res.moved === 1 ? '' : 's'} moved onto the beat` : `${t.label} restored`);
+    } catch (e) { toast(String(e)); } finally { if (btn.isConnected) { btn.disabled = false; btn.textContent = label; } }
   }
+  const levelOut = (t, btn) => audioAction(t, btn, 'level');
 
   // ── opening and closing: in place (nothing else redraws), interruptible, latest intent wins ──
   const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -283,5 +293,5 @@
     const d = open.find(x => x.contains(document.activeElement)) || open.find(x => x.matches(':hover'));
     if (d?._toggle) { e.preventDefault(); d._toggle(); }
   });
-  window.ContourSound = { setFx, PRESETS, kindOf, levelOut, toggleRecording, REC };
+  window.ContourSound = { setFx, PRESETS, kindOf, levelOut, audioAction, toggleRecording, REC };
 })();

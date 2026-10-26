@@ -16,6 +16,7 @@ pub mod stft;
 pub mod stretch;
 pub mod tune;
 pub mod fx;
+pub mod sync;
 pub mod whisper;
 
 /// Model sample rate. Every model in the registry runs at 44.1 kHz.
