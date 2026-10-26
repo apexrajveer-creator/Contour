@@ -344,6 +344,7 @@ fn main() {
         Some("models") => parse(&args[1..]).and_then(models_cmd),
         Some("mashup") => parse(&args[1..]).and_then(mashup_cmd),
         Some("lyrics") => parse(&args[1..]).and_then(lyrics_cmd),
+        Some("windows") => (|| -> Result<()> { let d = audio::decode(std::path::Path::new(&args[1]))?; let a = audio::resample(&d.audio, d.rate, SR)?; let w = contour_engine::whisper::window_plan(&a)?; eprintln!("{} windows: {:?}", w.len(), w.iter().map(|(a, b)| format!("{a:.1}-{b:.1}")).collect::<Vec<_>>()); Ok(()) })(),
         Some("fxcheck") => fxcheck(args.get(1).map(String::as_str).unwrap_or(".")),
         _ => {
             print!("{HELP}");

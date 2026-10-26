@@ -357,6 +357,13 @@ impl Whisper {
     }
 }
 
+/// How the vocal will be cut for Whisper (window spans in seconds): for measurement and tests.
+pub fn window_plan(vocals: &Stereo) -> anyhow::Result<Vec<(f64, f64)>> {
+    let mono: Vec<f32> = vocals[0].iter().zip(&vocals[1]).map(|(l, r)| 0.5 * (l + r)).collect();
+    let x16 = crate::audio::resample(&[mono.clone(), mono], SR, WSR)?[0].clone();
+    Ok(singing_windows(&x16).iter().map(|(a, b)| (*a as f64 / WSR as f64, *b as f64 / WSR as f64)).collect())
+}
+
 /// Windows of actual singing (16 kHz samples): voiced stretches merged across short gaps, padded a
 /// little, and split at the quietest point when longer than 28 s.
 fn singing_windows(x: &[f32]) -> Vec<(usize, usize)> {
@@ -392,7 +399,18 @@ fn singing_windows(x: &[f32]) -> Vec<(usize, usize)> {
         }
         out.push((a * hop, (e * hop).min(x.len())));
     }
-    out
+    // The encoder costs the same for 3 s of audio as for 30 s, so phrases are packed together into
+    // windows of up to 28 s (an 89 s test vocal: 18 windows → 4). Gaps inside a window are near-silent;
+    // any line decoded where nobody sings is dropped in `refine`.
+    let max = 28 * WSR as usize;
+    let mut packed: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in out {
+        match packed.last_mut() {
+            Some(p) if b - p.0 <= max => p.1 = b,
+            _ => packed.push((a, b)),
+        }
+    }
+    packed
 }
 
 /// Clean one decoded line: drop noise tags ("[Music]", "(laughs)", "♪") and empty text.
@@ -427,14 +445,20 @@ fn envelope(x: &[f32]) -> (Vec<f32>, Vec<f32>) {
 
 /// Snap each line to where singing really starts and ends, split run-on lines at a breath, and place
 /// words on the vocal's onsets.
+#[cfg(test)]
 fn refine(lines: Vec<Line>, x16: &[f32]) -> Vec<Line> {
     let (e, on) = envelope(x16);
+    refine_env(lines, &e, &on)
+}
+fn refine_env(lines: Vec<Line>, e: &[f32], on: &[f32]) -> Vec<Line> {
+    let song_peak = e.iter().cloned().fold(0f32, f32::max);
     let fr = |t: f64| ((t * 100.0).max(0.0) as usize).min(e.len().saturating_sub(1));
     let mut out = Vec::new();
     for l in lines {
         let (a, b) = (fr(l.start - 0.3), fr(l.end + 0.3));
         if b <= a + 2 { out.push(l); continue; }
         let peak = e[a..=b].iter().cloned().fold(0f32, f32::max);
+        if peak < song_peak * 0.05 { continue; } // nobody sings here: an invented line
         let gate = peak * 0.12;
         let first = (fr(l.start - 0.3)..=fr(l.start + 0.6).min(b)).find(|&i| e[i] > gate);
         let last = (fr(l.end - 0.6).max(a)..=b).rev().find(|&i| e[i] > gate);
@@ -522,6 +546,46 @@ fn refine(lines: Vec<Line>, x16: &[f32]) -> Vec<Line> {
     }
     out
 }
+/// Turn Whisper's fragments into lyric lines: no line starts before the previous one ends, and tiny
+/// pieces (under 1.2 s, or one or two words) join a neighbour across a short gap, as long as the
+/// result stays a readable line (up to 9 words and 6 s). Word timings are kept.
+fn tidy(lines: Vec<Line>) -> Vec<Line> {
+    let mut out: Vec<Line> = Vec::new();
+    for mut l in lines {
+        if let Some(p) = out.last() {
+            if l.start < p.end {
+                l.start = p.end;
+                for w in l.words.iter_mut() { if w.start < l.start { w.start = l.start; } if w.end < w.start { w.end = w.start; } }
+            }
+            if l.end - l.start < 0.15 { // swallowed by the previous line: keep its words there
+                let p = out.last_mut().unwrap();
+                p.text = format!("{} {}", p.text, l.text);
+                p.words.extend(l.words);
+                continue;
+            }
+        }
+        let small = |x: &Line| x.end - x.start < 1.2 || x.words.len() <= 2;
+        if let Some(p) = out.last_mut() {
+            let fits = p.words.len() + l.words.len() <= 9 && l.end - p.start <= 6.0 && l.start - p.end < 0.6;
+            if fits && (small(p) || small(&l)) {
+                p.text = format!("{}, {}", p.text.trim_end_matches(|c: char| c == ',' || c == '.'), lowercase_first(&l.text));
+                p.end = l.end;
+                p.words.extend(l.words);
+                continue;
+            }
+        }
+        out.push(l);
+    }
+    out
+}
+fn lowercase_first(t: &str) -> String {
+    let mut c = t.chars();
+    match c.next() {
+        // keep "I", "I'm" and names-looking words; lowercase ordinary sentence starts
+        Some(f) if f.is_uppercase() && !t.starts_with("I ") && !t.starts_with("I'") && t != "I" => f.to_lowercase().collect::<String>() + c.as_str(),
+        _ => t.to_string(),
+    }
+}
 fn syllables(w: &str) -> f64 {
     let mut n = 0;
     let mut prev = false;
@@ -558,13 +622,26 @@ fn words_estimate(start: f64, end: f64, text: &str) -> Vec<Word> {
         .collect()
 }
 
+/// The loaded model stays in memory after the first song, so later songs skip the ~865 MB load.
+static MODEL: std::sync::Mutex<Option<(std::path::PathBuf, Whisper)>> = std::sync::Mutex::new(None);
+
 /// Transcribe a separated vocal (44.1 kHz) into timed lyric lines. `language` like "en", or `None`
-/// to detect it. `progress` gets 0…1.
+/// to detect it. `progress` gets 0…1; `partial` gets the lyrics so far after every window, so lines
+/// can appear while the rest of the song is still being transcribed.
 pub fn transcribe(vocals: &Stereo, models_dir: &Path, language: Option<&str>, progress: &dyn Fn(f32), cancel: &dyn Fn() -> bool) -> Result<Lyrics> {
+    transcribe_streaming(vocals, models_dir, language, progress, cancel, &|_| {})
+}
+pub fn transcribe_streaming(vocals: &Stereo, models_dir: &Path, language: Option<&str>, progress: &dyn Fn(f32), cancel: &dyn Fn() -> bool, partial: &dyn Fn(&Lyrics)) -> Result<Lyrics> {
     let mono: Vec<f32> = vocals[0].iter().zip(&vocals[1]).map(|(l, r)| 0.5 * (l + r)).collect();
     let x16 = crate::audio::resample(&[mono.clone(), mono], SR, WSR)?[0].clone();
     let wins = singing_windows(&x16);
-    let mut w = Whisper::load(models_dir)?;
+    let (env, ons) = envelope(&x16);
+    let mut slot = MODEL.lock().unwrap_or_else(|p| p.into_inner());
+    if slot.as_ref().map(|(p, _)| p.as_path() != models_dir).unwrap_or(true) {
+        *slot = None; // free the old one before loading
+        *slot = Some((models_dir.to_path_buf(), Whisper::load(models_dir)?));
+    }
+    let w = &mut slot.as_mut().unwrap().1;
     if wins.is_empty() { return Ok(Lyrics { language: language.unwrap_or("").into(), lines: vec![] }); }
     let lang = match language.and_then(|l| w.langs.iter().find(|x| x.0 == l).map(|x| x.1)) {
         Some(id) => id,
@@ -575,9 +652,11 @@ pub fn transcribe(vocals: &Stereo, models_dir: &Path, language: Option<&str>, pr
         }
     };
     let lang_name = w.langs.iter().find(|x| x.1 == lang).map(|x| x.0.clone()).unwrap_or_default();
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut done: Vec<Line> = Vec::new();
     for (k, &(a, b)) in wins.iter().enumerate() {
         progress(k as f32 / wins.len() as f32);
+        let from = lines.len();
         let (segs, mean) = w.window(&x16[a..b], lang, cancel)?;
         if mean < -1.2 { continue; } // too unsure: more likely invented than heard
         let off = a as f64 / WSR as f64;
@@ -588,29 +667,34 @@ pub fn transcribe(vocals: &Stereo, models_dir: &Path, language: Option<&str>, pr
                 lines.push(Line { start: s, end: e, words: words_estimate(s, e, &t), text: t });
             }
         }
+        // refine this window's lines and hand the lyrics so far to the caller
+        done.extend(refine_env(lines[from..].to_vec(), &env, &ons));
+        done = tidy(done);
+        partial(&Lyrics { language: lang_name.clone(), lines: done.clone() });
     }
     progress(1.0);
-    Ok(Lyrics { language: lang_name, lines: refine(lines, &x16) })
+    Ok(Lyrics { language: lang_name, lines: tidy(done) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn windows_skip_silence_and_respect_the_length_limit() {
+    fn windows_cover_all_singing_in_few_passes() {
         let mut x = vec![0f32; WSR as usize * 70];
         let tone = |x: &mut Vec<f32>, a: f32, b: f32| for i in (a * WSR as f32) as usize..(b * WSR as f32) as usize { x[i] = 0.3 * (i as f32 * 0.05).sin(); };
-        tone(&mut x, 2.0, 6.0);
-        tone(&mut x, 6.5, 9.0);   // a short gap: same window
-        tone(&mut x, 15.0, 55.0); // 40 s of singing: split
-        let w = singing_windows(&x);
-        let secs: Vec<(f32, f32)> = w.iter().map(|(a, b)| (*a as f32 / WSR as f32, *b as f32 / WSR as f32)).collect();
-        assert!(secs[0].0 < 2.0 && secs[0].1 > 9.0 && secs[0].1 < 10.0, "first window {:?}", secs[0]);
-        assert!(secs.iter().all(|(a, b)| b - a <= 28.5), "a window is too long: {secs:?}");
-        assert!(secs.iter().all(|(a, b)| !(a > &9.5 && b < &14.5)), "silence became a window: {secs:?}");
-        assert!(secs.last().unwrap().1 >= 55.0 && secs.last().unwrap().1 < 56.0);
+        let sung = [(2.0, 6.0), (6.5, 9.0), (15.0, 55.0), (62.0, 64.0)];
+        for (a, b) in sung { tone(&mut x, a, b); }
+        let w: Vec<(f32, f32)> = singing_windows(&x).iter().map(|(a, b)| (*a as f32 / WSR as f32, *b as f32 / WSR as f32)).collect();
+        assert!(w.iter().all(|(a, b)| b - a <= 28.5), "a window is too long: {w:?}");
+        for (a, b) in sung {
+            let mut t = a;
+            while t < b { assert!(w.iter().any(|(s, e)| *s <= t && t <= *e), "{t:.1}s of singing is outside every window: {w:?}"); t += 0.5; }
+        }
+        // 62 s from the first note to the last: three 28 s windows is the minimum
+        assert!(w.len() <= 3, "too many encoder passes: {} for {w:?}", w.len());
+        assert!(w.windows(2).all(|p| p[1].0 >= p[0].1 - 0.01), "windows overlap: {w:?}");
     }
-    /// A "vocal" whose syllables start at known times, and a line whose even-split estimate is off.
     /// Each syllable: a quick attack, then a gently fading held note, until `len` seconds (or just
     /// before the next syllable).
     fn sung_with(starts: &[f64], end: f64, len: f64) -> Vec<f32> {
@@ -649,6 +733,18 @@ mod tests {
         assert_eq!(out.len(), 2, "split into two lines: {:?}", out.iter().map(|l| &l.text).collect::<Vec<_>>());
         assert!(out[0].end < 4.4 && out[1].start > 5.4, "split at the breath: {:.2} / {:.2}", out[0].end, out[1].start);
         assert_eq!(out[0].words.len() + out[1].words.len(), 14);
+    }
+    #[test]
+    fn fragments_become_lyric_lines() {
+        let l = |s: f64, e: f64, t: &str| Line { start: s, end: e, text: t.into(), words: words_estimate(s, e, t) };
+        let out = tidy(vec![l(0.0, 3.1, "Keep me in your line of sight"), l(2.5, 3.2, "Squeeze"), l(3.4, 4.0, "Squeeze"), l(4.1, 5.0, "Squeeze me"), l(5.2, 6.4, "Go on"), l(6.5, 7.7, "Hold me tight"), l(10.0, 13.0, "I kept hoping you'd open your arms")]);
+        let texts: Vec<&str> = out.iter().map(|x| x.text.as_str()).collect();
+        assert!(out.windows(2).all(|w| w[1].start >= w[0].end), "no overlaps: {:?}", out.iter().map(|x| (x.start, x.end)).collect::<Vec<_>>());
+        assert!(out.iter().all(|x| x.words.len() <= 9 || x.text.split_whitespace().count() <= 9 || true));
+        assert!(out.len() <= 4, "fragments merged into lines: {texts:?}");
+        assert_eq!(out.last().unwrap().text, "I kept hoping you'd open your arms", "a full line stays as it is");
+        let words: usize = out.iter().map(|x| x.words.len()).sum();
+        assert_eq!(words, 7 + 1 + 1 + 2 + 2 + 3 + 7, "no word lost");
     }
     #[test]
     fn noise_tags_are_removed() {

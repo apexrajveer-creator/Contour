@@ -1022,20 +1022,38 @@ fn remove_stem(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 }
 
 
+/// Lyrics jobs run in the background (they never hold the app's busy lock, so Sing stays usable);
+/// one at a time, with their own cancel.
+static LYRICS_RUNNING: AtomicBool = AtomicBool::new(false);
+static LYRICS_CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize, Clone)]
+struct LyricsProgress {
+    fraction: f32,
+    stage: String,
+    detail: String,
+}
+
 /// Lyrics for the current song, transcribed on this computer from the separated vocal with Whisper.
-/// The lyrics model is downloaded the first time (once; verified by SHA-256).
+/// The model is downloaded the first time (once; verified by SHA-256) and kept loaded between songs.
+/// Emits `lyrics-progress` and, after every window, `lyrics-partial` with the lines so far.
 #[tauri::command]
 async fn transcribe_lyrics(app: AppHandle, state: State<'_, AppState>, language: Option<String>) -> CmdResult<contour_engine::whisper::Lyrics> {
-    let _guard = claim(&state)?;
+    if LYRICS_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("Lyrics are already being written.".into());
+    }
+    struct Release;
+    impl Drop for Release { fn drop(&mut self) { LYRICS_RUNNING.store(false, Ordering::SeqCst); } }
+    let _release = Release;
     let vocals = {
         let inner = state.inner.lock().unwrap();
         inner.stems.iter().find(|s| s.id == "vocals").or_else(|| inner.stems.iter().find(|s| s.id == "lead")).map(|s| s.audio.clone()).ok_or("Separate the vocals first.")?
     };
     let dir = state.models_dir.clone();
-    let cancel = state.cancel.clone();
-    cancel.store(false, Ordering::SeqCst);
+    LYRICS_CANCEL.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<contour_engine::whisper::Lyrics> {
-        let emit = |fraction: f32, stage: &str, detail: String| { let _ = app.emit("progress", Progress { fraction, stage: stage.into(), detail }); };
+        let emit = |fraction: f32, stage: &str, detail: String| { let _ = app.emit("lyrics-progress", LyricsProgress { fraction, stage: stage.into(), detail }); };
+        let cancelled = || LYRICS_CANCEL.load(Ordering::SeqCst);
         let specs: Vec<_> = contour_engine::whisper::MODEL_IDS.iter().filter_map(|id| models::spec(id).ok()).collect();
         let total: u64 = specs.iter().filter(|m| !models::is_present(&dir, m)).map(|m| m.size).sum();
         let mut done = 0u64;
@@ -1043,20 +1061,30 @@ async fn transcribe_lyrics(app: AppHandle, state: State<'_, AppState>, language:
             if models::is_present(&dir, m) { continue; }
             let base = done;
             models::ensure(&dir, m, &mut |got, _| {
-                if cancel.load(Ordering::SeqCst) { anyhow::bail!(contour_engine::Cancelled); }
-                emit(((base + got) as f32 / total.max(1) as f32) * 0.3, "Downloading the lyrics model", format!("{} / {} MB", (base + got) / 1_000_000, total / 1_000_000));
+                if cancelled() { anyhow::bail!(contour_engine::Cancelled); }
+                emit(((base + got) as f32 / total.max(1) as f32) * 0.25, "Downloading the lyrics model", format!("{} / {} MB", (base + got) / 1_000_000, total / 1_000_000));
                 Ok(())
             })?;
             done += m.size;
         }
-        emit(0.3, "Writing lyrics", String::new());
-        contour_engine::whisper::transcribe(&vocals, &dir, language.as_deref(), &|f| emit(0.3 + 0.7 * f, "Writing lyrics", format!("{}%", (f * 100.0).round())), &|| cancel.load(Ordering::SeqCst))
+        emit(0.25, "Writing lyrics", String::new());
+        contour_engine::whisper::transcribe_streaming(
+            &vocals, &dir, language.as_deref(),
+            &|f| emit(0.25 + 0.75 * f, "Writing lyrics", format!("{}%", (f * 100.0).round())),
+            &cancelled,
+            &|partial| { let _ = app.emit("lyrics-partial", partial); },
+        )
     })
     .await
     .map_err(err)?
     .map_err(friendly)
 }
 
+/// Stop a lyrics job (for example when another song is opened).
+#[tauri::command]
+fn cancel_lyrics() {
+    LYRICS_CANCEL.store(true, Ordering::SeqCst);
+}
 
 /// "Level out": even out the stem's loud and quiet passages (an automatic rider). The original is kept
 /// for `restore_stem`.
@@ -1765,6 +1793,7 @@ pub fn run() {
             add_lane,
             remove_stem,
             transcribe_lyrics,
+            cancel_lyrics,
             level_stem,
             restore_stem,
             add_recording,

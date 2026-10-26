@@ -210,5 +210,23 @@
       seen.set(el, el.hidden);
     }
   }).observe(document.body, { attributes: true, attributeFilter: ['hidden'], subtree: true });
+  // ── the song title sits exactly in the window's centre ──
+  // Both side columns take the width of the wider side (the tabs and window buttons), so the middle
+  // column is centred on the window. When that would leave the title less than 220 px, the header
+  // falls back to logo | title | tabs, where the title fills the gap: centred or not, it never overlaps.
+  const bar = document.querySelector('header.bar'), brandEl = bar?.querySelector('.brand'), rightEl = bar?.querySelector('.bar-right');
+  const centreTitle = () => {
+    if (!bar || !brandEl || !rightEl) return;
+    const side = Math.ceil(Math.max(brandEl.scrollWidth, rightEl.scrollWidth));
+    const cs = getComputedStyle(bar), gap = parseFloat(cs.columnGap) || 0;
+    const inner = bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const room = inner - 2 * side - 2 * gap;
+    // what the title needs: its full width, but a long one is happy truncating to 220 px
+    const nowEl = bar.querySelector('.now');
+    const natural = nowEl ? Math.max(...[...nowEl.children].map(c => c.scrollWidth)) : 0;
+    const need = Math.min(220, natural + 4);
+    bar.style.setProperty('grid-template-columns', room >= need ? `${side}px minmax(0,1fr) ${side}px` : 'auto minmax(0,1fr) auto', 'important');
+  };
+  if (bar) { const nowEl0 = bar.querySelector('.now'); if (nowEl0) new MutationObserver(centreTitle).observe(nowEl0, { childList: true, characterData: true, subtree: true }); new ResizeObserver(centreTitle).observe(bar); new ResizeObserver(centreTitle).observe(rightEl); new ResizeObserver(centreTitle).observe(brandEl); centreTitle(); }
   window.ContourPalette = { open, close, commands: C, kind };
 })();

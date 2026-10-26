@@ -174,15 +174,17 @@
     remove_stem: ({ id }) => { delete store[id]; },
     transcribe_lyrics: async () => {
       // preview stand-in (the real lyrics come from Whisper in the engine): original placeholder lines on the vocal's phrases
-      for (let k = 0; k <= 10; k++) { emit('progress', { fraction: k / 10, stage: 'Writing lyrics', detail: `${k * 10}%` }); await new Promise(r => setTimeout(r, 60)); }
+      for (let k = 0; k <= 10; k++) { emit('lyrics-progress', { fraction: k / 10, stage: 'Writing lyrics', detail: `${k * 10}%` }); await new Promise(r => setTimeout(r, 60)); }
       const v = store.vocals[0], hop = SR / 20, rms = [];
       for (let i = 0; i + hop < N; i += hop) { let s = 0; for (let j = i; j < i + hop; j++) s += v[j] * v[j]; rms.push(Math.sqrt(s / hop)); }
       const peak = Math.max(...rms), spans = []; let s0 = -1;
       rms.forEach((r, i) => { if (r > peak * 0.08) { if (s0 < 0) s0 = i; } else if (s0 >= 0) { if (i - s0 > 6) spans.push([s0 / 20, i / 20]); s0 = -1; } });
       const words = ['Under a glass sky we wander slow', 'Counting the lights as the city goes', 'Hold on to the echo, hold on to the sound', 'Paper boats drifting where the rivers run', 'Every little heartbeat finds its way home', 'Singing it louder till the morning comes'];
       const lines = spans.map(([a, b], i) => { const text = words[i % words.length], ws = text.split(' '), d = (b - a) / ws.length; return { start: a, end: b, text, words: ws.map((w, k) => ({ start: a + k * d, end: a + (k + 1) * d, text: w })) }; });
+      emit('lyrics-partial', { language: 'en', lines: lines.slice(0, 1) }); await new Promise(r => setTimeout(r, 300));
       return { language: 'en', lines };
     },
+    cancel_lyrics: () => null,
     level_stem: async ({ id }) => {
       await new Promise(r => setTimeout(r, 250));
       store.__orig = store.__orig || {}; store.__orig[id] = store.__orig[id] || store[id];

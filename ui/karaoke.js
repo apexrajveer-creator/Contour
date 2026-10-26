@@ -115,7 +115,7 @@ async function listMics() {
 async function startSinging() {
   if (!S.source || S.busy) return;
   if (!hasVocals()) {
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'balanced', lead_backing: false, instruments: 'none', dereverb: false });
+    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
     if (!hasVocals()) return; // cancelled or failed
     setMode('karaoke');
   }
@@ -466,7 +466,7 @@ async function importTake() {
   const path = await invoke('pick_audio');
   if (!path) return;
   if (!hasVocals()) {
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'balanced', lead_backing: false, instruments: 'none', dereverb: false });
+    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
     if (!hasVocals()) return;
   }
   busyStart('Lining up your take');
@@ -570,6 +570,7 @@ function updateLyrics(t) {
   let cur = 0;
   for (let i = 0; i < LY.items.length; i++) if (LY.items[i].start <= t + 0.05) cur = i;
   const box = $('lyrics'), anchor = box.clientHeight * 0.32;
+  if (cur !== LY.cur && LY.pending) { LY.pending = false; renderLyrics(); return; }
   if (cur !== LY.cur) {
     LY.cur = cur;
     LY.items.forEach((it, i) => {
@@ -603,31 +604,81 @@ function lyricsLoop() {
   };
   LY.raf = requestAnimationFrame(tick);
 }
-async function getLyrics() {
-  if (!S.source) { toast('Choose a song first.'); return; }
+// Lyrics are written in the background: they never lock the app, lines appear as each part of the
+// song is done, and finished lyrics are remembered per song (so reopening a song shows them at once).
+const LYRICS_CACHE = 'contour.lyrics.v1';
+const songKey = () => (S.source ? `${S.source.path || S.source.name}|${Math.round((S.source.duration || duration() || 0) * 10)}` : '');
+function cachedLyrics() {
+  try { return JSON.parse(localStorage.getItem(LYRICS_CACHE) || '{}')[songKey()] || null; } catch { return null; }
+}
+function rememberLyrics(data) {
+  try {
+    const all = JSON.parse(localStorage.getItem(LYRICS_CACHE) || '{}');
+    all[songKey()] = { language: data.language, lines: data.lines, at: Date.now() };
+    const keys = Object.keys(all).sort((a, b) => (all[b].at || 0) - (all[a].at || 0));
+    for (const old of keys.slice(40)) delete all[old]; // bounded: the 40 most recent songs
+    localStorage.setItem(LYRICS_CACHE, JSON.stringify(all));
+  } catch { /* storage full or unavailable: fine */ }
+}
+LY.running = false;
+LY.job = 0;
+function applyLyrics(data, final) {
+  const wasEmpty = !LY.data?.lines?.length;
+  LY.data = { language: data.language, lines: data.lines, for: S.source?.path };
+  lyricsStatus();
+  if (final || wasEmpty || !K.singing) renderLyrics(); // while singing, partial updates re-render only between lines
+  else LY.pending = true;
+}
+listen('lyrics-partial', ({ payload }) => { if (LY.running && payload?.lines?.length) applyLyrics(payload, false); });
+listen('lyrics-progress', ({ payload: p }) => {
+  if (!LY.running) return;
+  const n = LY.data?.lines?.length || 0;
+  $('sing-lyrics-status').textContent = p.stage === 'Writing lyrics' ? `Writing lyrics · ${Math.round(p.fraction * 100)}%${n ? ` · ${n} lines so far` : ''}` : `${p.stage} · ${p.detail}`;
+});
+async function getLyrics({ auto = false } = {}) {
+  if (!S.source) { if (!auto) toast('Choose a song first.'); return; }
+  if (LY.running) return;
   if (!hasVocals()) {
-    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'balanced', lead_backing: false, instruments: 'none', dereverb: false });
+    if (auto) return; // automatic runs wait for the vocals; they start right after separation
+    await separate({ quality: $('simple-flagship')?.checked ? 'max' : 'fast', lead_backing: false, instruments: 'none', dereverb: false });
     if (!hasVocals()) return;
     setMode('karaoke');
   }
-  busyStart('Writing lyrics');
-  $('sing-lyrics-status').textContent = 'Listening to the vocal…';
+  const job = ++LY.job, song = songKey();
+  LY.running = true;
+  $('sing-lyrics-get').disabled = true;
+  $('sing-lyrics-status').textContent = 'Writing lyrics…';
   try {
-    LY.data = await invoke('transcribe_lyrics', { language: $('sing-lang').value || null });
-    LY.data.for = S.source?.path;
-    lyricsStatus();
-    renderLyrics();
+    const res = await invoke('transcribe_lyrics', { language: $('sing-lang').value || null });
+    if (job !== LY.job || song !== songKey()) return; // another song since: drop it
+    applyLyrics(res, true);
+    rememberLyrics(res);
     ContourProduct.changed();
   } catch (e) {
-    $('sing-lyrics-status').textContent = String(e) === 'cancelled' ? '' : 'Couldn\'t write lyrics';
-    if (String(e) !== 'cancelled') toast(String(e));
-  } finally { busyEnd(); singRefresh(); } // re-enable Start and the other setup controls
+    if (job === LY.job && !/cancel/i.test(String(e))) {
+      $('sing-lyrics-status').textContent = "Couldn't write lyrics";
+      if (!auto) toast(String(e));
+    }
+  } finally {
+    if (job === LY.job) { LY.running = false; $('sing-lyrics-get').disabled = false; lyricsStatus(); }
+  }
 }
+/** Lyrics without asking: cached ones at once, otherwise a background job once the vocals exist. */
+function autoLyrics() {
+  if (S.mode !== 'karaoke' || !S.source || LY.running) return;
+  if (LY.data?.lines?.length && LY.data.for === S.source.path) return;
+  if (hasVocals() && typeof loadMelody === 'function') loadMelody().catch(() => {}); // cached per song; Start won't wait for it
+  const hit = cachedLyrics();
+  if (hit?.lines?.length) { applyLyrics(hit, true); return; }
+  if (hasVocals()) getLyrics({ auto: true });
+}
+
 function lyricsStatus() {
   const n = LY.data?.lines?.length || 0;
   $('sing-lyrics-status').textContent = n ? `${n} lines${LY.data.language ? ' · ' + LY.data.language.toUpperCase() : ''}` : (LY.data ? 'No singing found' : '');
   $('sing-lyrics-edit').hidden = !n;
   $('sing-lyrics-get').textContent = n ? 'Rewrite lyrics' : 'Get lyrics';
+  if (LY.running) $('sing-lyrics-status').textContent = n ? `Writing lyrics · ${n} lines so far` : 'Writing lyrics…';
 }
 // editor: fix words; timings stay attached (word timings are re-estimated for edited lines)
 function openLyricsEditor() {
@@ -662,7 +713,18 @@ document.addEventListener('contour:mode', e => {
   if (e.detail !== 'karaoke') return;
   if (LY.data && LY.data.for && S.source && LY.data.for !== S.source.path) LY.data = null; // another song
   lyricsStatus(); renderLyrics(); lyricsLoop();
+  autoLyrics();
 });
+// a different song: stop any lyrics job for the old one
+let lyricsSong = '';
+setInterval(() => {
+  const key = S.source ? songKey() : '';
+  if (key !== lyricsSong) {
+    if (lyricsSong && LY.running) { invoke('cancel_lyrics').catch(() => {}); LY.job++; LY.running = false; $('sing-lyrics-get').disabled = false; }
+    lyricsSong = key;
+  }
+  if (S.mode === 'karaoke' && !LY.running && !K.singing && hasVocals?.() && !(LY.data?.lines?.length)) autoLyrics(); // vocals just arrived
+}, 700);
 window.addEventListener('resize', () => { if (LY.data && S.mode === 'karaoke') renderLyrics(); });
 
 // ───────────────────────── scoring 2.0: a quiet rating per line ─────────────────────────

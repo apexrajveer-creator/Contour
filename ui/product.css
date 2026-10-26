@@ -227,8 +227,8 @@ html[data-mode=karaoke] .global-player{display:none}
 .ly-line.ly-now.ly-good .w.ly-on{text-shadow:0 0 22px rgba(141,184,240,.75)}
 .ly-line.ly-now.ly-bad .w.ly-on{text-shadow:0 0 18px rgba(242,140,140,.55)}
 .ly-line.ly-near{opacity:.7}
-.ly-line.ly-mid{opacity:.45;filter:blur(1.2px)}
-.ly-line.ly-far{opacity:.22;filter:blur(2.4px)}
+.ly-line.ly-mid{opacity:.45;filter:blur(1px)}
+.ly-line.ly-far{opacity:.2}
 .ly-line.ly-past{opacity:.3}
 .ly-gap{display:flex;gap:12px;height:48px;align-items:center}
 .ly-gap i{width:14px;height:14px;border-radius:50%;background:rgba(233,241,251,.25);transition:background 300ms ease,transform 300ms ease}
@@ -426,3 +426,6 @@ header.bar .brand{display:flex;align-items:center;gap:12px}
 .credit div{display:grid;gap:2px}
 .credit strong{font:600 13px var(--display);color:var(--bone);letter-spacing:.01em}
 .credit span{font-size:12px;color:var(--mute)}
+
+/* even side padding, so the centred title is centred on the window to the pixel */
+header.bar{padding-left:18px!important;padding-right:18px!important}
