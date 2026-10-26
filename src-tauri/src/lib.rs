@@ -1040,7 +1040,7 @@ struct LyricsProgress {
 /// The model is downloaded the first time (once; verified by SHA-256) and kept loaded between songs.
 /// Emits `lyrics-progress` and, after every window, `lyrics-partial` with the lines so far.
 #[tauri::command]
-async fn transcribe_lyrics(app: AppHandle, state: State<'_, AppState>, language: Option<String>) -> CmdResult<contour_engine::whisper::Lyrics> {
+async fn transcribe_lyrics(app: AppHandle, state: State<'_, AppState>, language: Option<String>, device: Option<Device>) -> CmdResult<contour_engine::whisper::Lyrics> {
     if LYRICS_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("Lyrics are already being written.".into());
     }
@@ -1071,7 +1071,7 @@ async fn transcribe_lyrics(app: AppHandle, state: State<'_, AppState>, language:
         }
         emit(0.25, "Writing lyrics", String::new());
         contour_engine::whisper::transcribe_streaming(
-            &vocals, &dir, language.as_deref(),
+            &vocals, &dir, language.as_deref(), device.unwrap_or_default(),
             &|f| emit(0.25 + 0.75 * f, "Writing lyrics", format!("{}%", (f * 100.0).round())),
             &cancelled,
             &|partial| { let _ = app.emit("lyrics-partial", partial); },

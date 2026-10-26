@@ -173,6 +173,7 @@
     },
     remove_stem: ({ id }) => { delete store[id]; },
     transcribe_lyrics: async () => {
+      if (window.__failLyrics) { await new Promise(r => setTimeout(r, 300)); throw 'Could not reach the internet to download the lyrics model.'; }
       // preview stand-in (the real lyrics come from Whisper in the engine): original placeholder lines on the vocal's phrases
       for (let k = 0; k <= 10; k++) { emit('lyrics-progress', { fraction: k / 10, stage: 'Writing lyrics', detail: `${k * 10}%` }); await new Promise(r => setTimeout(r, 60)); }
       const v = store.vocals[0], hop = SR / 20, rms = [];

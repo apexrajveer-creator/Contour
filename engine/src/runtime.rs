@@ -74,6 +74,15 @@ fn cpu_session(path: &Path, optimize: bool) -> Result<Session> {
     b.commit_from_file(path).map_err(|e| anyhow!("could not load model {}: {e}", path.display()))
 }
 
+/// A CPU session with a chosen number of threads (background work leaves a core free for audio and
+/// the interface).
+pub fn cpu_session_threads(path: &Path, optimize: bool, threads: usize) -> Result<Session> {
+    let b = Session::builder(env()?).map_err(|e| anyhow!("onnx runtime: {e}"))?;
+    let b = b.with_optimization_level(level(optimize)).map_err(|e| anyhow!("{e}"))?;
+    let mut b = b.with_intra_threads(threads.max(1)).map_err(|e| anyhow!("{e}"))?;
+    b.commit_from_file(path).map_err(|e| anyhow!("could not load model {}: {e}", path.display()))
+}
+
 /// Why each accelerator that was tried could not be used (most recent load only).
 static NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 

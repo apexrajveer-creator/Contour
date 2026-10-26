@@ -82,8 +82,10 @@ const hasVocals = () => S.tracks.some(t => t.id === 'vocals' || t.id === 'lead')
 function singRefresh() {
   const songName = S.source?.name?.replace(/\.[^.]+$/, '') || '';
   $('sing-song').textContent = songName || 'Choose a song';
-  $('sing-start').disabled = !S.source || S.busy;
-  $('sing-start').textContent = !S.source ? 'Start singing' : hasVocals() ? 'Start singing' : 'Prepare and sing';
+  const writing = !!(typeof LY !== 'undefined' && LY.running);
+  const failed = !!(typeof LY !== 'undefined' && LY.failed && !lyricsReady());
+  $('sing-start').disabled = !S.source || S.busy || writing;
+  $('sing-start').textContent = !S.source ? 'Start singing' : writing ? (LY.startLabel || 'Writing lyrics…') : !hasVocals() ? 'Prepare and sing' : failed ? 'Retry lyrics' : 'Start singing';
   $('sing-sub').textContent = K.key ? K.key : '';
 }
 async function loadMelody() {
@@ -118,6 +120,11 @@ async function startSinging() {
     await separate({ quality: 'fast', lead_backing: false, instruments: 'none', dereverb: false }); // Sing always uses the fast model
     if (!hasVocals()) return; // cancelled or failed
     setMode('karaoke');
+  }
+  // singing starts only with finished lyrics (cached ones are instant); never without them
+  if (!lyricsReady()) {
+    await ensureLyrics();
+    if (!S.source || S.mode !== 'karaoke' || !lyricsReady()) { singRefresh(); return; } // failed, left Sing, or changed song
   }
   try { await loadMelody(); } catch (e) { toast(String(e)); return; }
   const ctx = audioContext();
@@ -635,10 +642,24 @@ listen('lyrics-progress', ({ payload: p }) => {
   if (!LY.running) return;
   const n = LY.data?.lines?.length || 0;
   $('sing-lyrics-status').textContent = p.stage === 'Writing lyrics' ? `Writing lyrics · ${Math.round(p.fraction * 100)}%${n ? ` · ${n} lines so far` : ''}` : `${p.stage} · ${p.detail}`;
+  LY.startLabel = p.stage === 'Writing lyrics' ? `Writing lyrics · ${Math.round(p.fraction * 100)}%` : 'Getting the lyrics model…';
+  if (!K.singing) singRefresh();
 });
-async function getLyrics({ auto = false } = {}) {
+/** This song's lyrics are finished (an instrumental's empty lyrics count, so it can't lock Sing). */
+const lyricsReady = () => !!(LY.data && S.source && LY.data.for === S.source.path);
+/** Lyrics for the current song: the cached ones, the job already running, or a new job. Resolves when done. */
+function ensureLyrics() {
+  const hit = cachedLyrics();
+  if (hit?.lines?.length) { applyLyrics(hit, true); return Promise.resolve(); }
+  return LY.running ? LY.promise : getLyrics({ auto: true });
+}
+function getLyrics(opts = {}) {
+  if (LY.running) return LY.promise;
+  LY.promise = runLyrics(opts);
+  return LY.promise;
+}
+async function runLyrics({ auto = false } = {}) {
   if (!S.source) { if (!auto) toast('Choose a song first.'); return; }
-  if (LY.running) return;
   if (!hasVocals()) {
     if (auto) return; // automatic runs wait for the vocals; they start right after separation
     await separate({ quality: 'fast', lead_backing: false, instruments: 'none', dereverb: false }); // Sing always uses the fast model
@@ -647,26 +668,29 @@ async function getLyrics({ auto = false } = {}) {
   }
   const job = ++LY.job, song = songKey();
   LY.running = true;
+  LY.failed = false;
+  LY.startLabel = 'Writing lyrics…';
   $('sing-lyrics-get').disabled = true;
   $('sing-lyrics-status').textContent = 'Writing lyrics…';
+  singRefresh();
   try {
-    const res = await invoke('transcribe_lyrics', { language: $('sing-lang').value || null });
+    const res = await invoke('transcribe_lyrics', { language: $('sing-lang').value || null, device: $('device')?.value || 'auto' }); // the encoder runs on the chosen GPU
     if (job !== LY.job || song !== songKey()) return; // another song since: drop it
     applyLyrics(res, true);
     rememberLyrics(res);
     ContourProduct.changed();
   } catch (e) {
     if (job === LY.job && !/cancel/i.test(String(e))) {
-      $('sing-lyrics-status').textContent = "Couldn't write lyrics";
+      LY.failed = true;
       if (!auto) toast(String(e));
     }
   } finally {
-    if (job === LY.job) { LY.running = false; $('sing-lyrics-get').disabled = false; lyricsStatus(); }
+    if (job === LY.job) { LY.running = false; $('sing-lyrics-get').disabled = false; lyricsStatus(); singRefresh(); }
   }
 }
 /** Lyrics without asking: cached ones at once, otherwise a background job once the vocals exist. */
 function autoLyrics() {
-  if (S.mode !== 'karaoke' || !S.source || LY.running) return;
+  if (S.mode !== 'karaoke' || !S.source || LY.running || LY.failed) return; // a failure waits for Retry lyrics
   if (LY.data?.lines?.length && LY.data.for === S.source.path) return;
   if (hasVocals() && typeof loadMelody === 'function') loadMelody().catch(() => {}); // cached per song; Start won't wait for it
   const hit = cachedLyrics();
@@ -676,7 +700,7 @@ function autoLyrics() {
 
 function lyricsStatus() {
   const n = LY.data?.lines?.length || 0;
-  $('sing-lyrics-status').textContent = n ? `${n} lines${LY.data.language ? ' · ' + LY.data.language.toUpperCase() : ''}` : (LY.data ? 'No singing found' : '');
+  $('sing-lyrics-status').textContent = n ? `${n} lines${LY.data.language ? ' · ' + LY.data.language.toUpperCase() : ''}` : LY.failed ? "Couldn't write lyrics. Press Retry lyrics to try again." : (LY.data ? 'No singing found' : '');
   $('sing-lyrics-edit').hidden = !n;
   $('sing-lyrics-get').textContent = n ? 'Rewrite lyrics' : 'Get lyrics';
   if (LY.running) $('sing-lyrics-status').textContent = n ? `Writing lyrics · ${n} lines so far` : 'Writing lyrics…';
@@ -722,9 +746,10 @@ setInterval(() => {
   const key = S.source ? songKey() : '';
   if (key !== lyricsSong) {
     if (lyricsSong && LY.running) { invoke('cancel_lyrics').catch(() => {}); LY.job++; LY.running = false; $('sing-lyrics-get').disabled = false; }
+    if (lyricsSong !== key) { LY.failed = false; singRefresh(); } // a new song gets a fresh attempt
     lyricsSong = key;
   }
-  if (S.mode === 'karaoke' && !LY.running && !K.singing && hasVocals?.() && !(LY.data?.lines?.length)) autoLyrics(); // vocals just arrived
+  if (S.mode === 'karaoke' && !LY.running && !LY.failed && !K.singing && hasVocals?.() && !(LY.data?.lines?.length)) autoLyrics(); // vocals just arrived (never re-tries a failure by itself)
 }, 700);
 window.addEventListener('resize', () => { if (LY.data && S.mode === 'karaoke') renderLyrics(); });
 
