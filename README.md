@@ -13,6 +13,7 @@ All on your own computer. Nothing is ever uploaded.
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-4fd1c5)](#system-requirements)
 [![License](https://img.shields.io/github/license/apexrajveer-creator/contour?color=9aa6b8)](LICENSE)
 [![CI](https://github.com/apexrajveer-creator/contour/actions/workflows/ci.yml/badge.svg)](https://github.com/apexrajveer-creator/contour/actions/workflows/ci.yml)
+![Downloads](https://img.shields.io/github/downloads/USERNAME/REPOSITORY/total?style=for-the-badge&logo=github&label=Downloads)
 
 <img src="docs/screenshots/studio.jpg" alt="Contour Studio: stems on a timeline, with a vocal's Sound drawer open" width="100%">
 
